@@ -55,13 +55,19 @@ jobs:
           foreach ($dll in @("vcruntime140.dll","vcruntime140_1.dll","msvcp140.dll")) {
             Copy-Item "C:\Windows\System32\$dll" $release
           }
-      - name: Install and bundle ffmpeg + exiftool
+      - name: Bundle ffmpeg and exiftool
         shell: pwsh
         run: |
-          choco install ffmpeg exiftool -y --no-progress
           $release = "build/windows/x64/runner/Release"
-          Copy-Item (Get-Command ffmpeg).Source $release
-          Copy-Item (Get-Command exiftool).Source $release
+          # ffmpeg: 下载完整静态版，复制整个 bin（含依赖 DLL）
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
+          $ffBin = Get-ChildItem ffmpeg_tmp -Recurse -Directory -Filter "bin" | Select-Object -First 1
+          Copy-Item "$($ffBin.FullName)/*" $release
+          # exiftool: 下载独立 exe
+          choco install exiftool -y --no-progress
+          $exifReal = Get-ChildItem "C:\ProgramData\chocolatey\lib\exiftool" -Recurse -Filter "exiftool*.exe" | Select-Object -First 1
+          Copy-Item $exifReal.FullName "$release/exiftool.exe"
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath PocketMotion-windows.zip
