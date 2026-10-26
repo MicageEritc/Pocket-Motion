@@ -21,6 +21,20 @@ jobs:
           flutter-version: '3.47.0'
       - run: flutter pub get
       - run: flutter build macos --release
+      - name: Bundle ffmpeg and exiftool
+        run: |
+          RES="build/macos/Build/Products/Release/Pocket Motion.app/Contents/Resources"
+          mkdir -p "$RES/bin"
+          # ffmpeg 静态版
+          curl -L -o /tmp/ffmpeg.zip "https://evermeet.cx/ffmpeg/getrelease/zip"
+          unzip -o /tmp/ffmpeg.zip -d /tmp/ffmpeg_bin
+          cp /tmp/ffmpeg_bin/ffmpeg "$RES/bin/ffmpeg"
+          chmod +x "$RES/bin/ffmpeg"
+          # exiftool
+          curl -L -o /tmp/exiftool.tar.gz "https://exiftool.org/Image-ExifTool-13.40.tar.gz"
+          tar -xzf /tmp/exiftool.tar.gz -C /tmp/
+          cp -R /tmp/Image-ExifTool-13.40 "$RES/exiftool_lib"
+          chmod +x "$RES/exiftool_lib/exiftool"
       - name: Package DMG
         run: |
           mkdir -p /tmp/dmg
@@ -55,12 +69,14 @@ jobs:
         shell: pwsh
         run: |
           $release = "build/windows/x64/runner/Release"
+          # ffmpeg
           Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
           Copy-Item "ffmpeg_tmp/ffmpeg-*/bin/ffmpeg.exe" $release
-          Invoke-WebRequest -Uri "https://exiftool.org/exiftool-13.55_64.zip" -OutFile exiftool.zip
+          # exiftool - 用更稳定的下载地址
+          Invoke-WebRequest -Uri "https://exiftool.org/exiftool-13.40_64.zip" -OutFile exiftool.zip
           Expand-Archive exiftool.zip -DestinationPath exiftool_tmp
-          Copy-Item "exiftool_tmp/exiftool(-k).exe" "$release/exiftool.exe"
+          Get-ChildItem exiftool_tmp -Recurse -Filter "exiftool*.exe" | Copy-Item -Destination "$release/exiftool.exe"
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath PocketMotion-windows.zip

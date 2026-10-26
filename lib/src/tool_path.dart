@@ -21,11 +21,13 @@ class ToolPath {
     final bundled = _bundledDir;
     if (bundled != null) {
       if (name == 'exiftool') {
-        final script = p.join(
-            p.dirname(bundled), 'exiftool_lib', 'bin', 'exiftool');
-        if (File(script).existsSync()) {
-          _cache[name] = script;
-          return script;
+        // exiftool 脚本可能在 exiftool_lib/ 根目录或 bin/ 下
+        for (final sub in ['exiftool', 'bin/exiftool']) {
+          final script = p.join(p.dirname(bundled), 'exiftool_lib', sub);
+          if (File(script).existsSync()) {
+            _cache[name] = script;
+            return script;
+          }
         }
       }
       final path = p.join(bundled, name);
