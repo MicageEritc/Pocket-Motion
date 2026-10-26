@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "com.example" "\0"
-            VALUE "FileDescription", "dji_live_gallery" "\0"
+            VALUE "FileDescription", "Pocket Motion" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "dji_live_gallery" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 com.example. All rights reserved." "\0"
             VALUE "OriginalFilename", "dji_live_gallery.exe" "\0"
-            VALUE "ProductName", "dji_live_gallery" "\0"
+            VALUE "ProductName", "Pocket Motion" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
