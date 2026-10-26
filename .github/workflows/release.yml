@@ -61,13 +61,18 @@ jobs:
             $src = "C:\Windows\System32\$dll"
             if (Test-Path $src) { Copy-Item $src $release }
           }
-      - name: Install and bundle ffmpeg + exiftool
+      - name: Bundle ffmpeg and exiftool
         shell: pwsh
         run: |
-          choco install ffmpeg exiftool -y --no-progress
           $release = "build/windows/x64/runner/Release"
-          Copy-Item "C:\ProgramData\chocolatey\bin\ffmpeg.exe" $release
-          Copy-Item "C:\ProgramData\chocolatey\bin\exiftool.exe" $release
+          # ffmpeg 静态版
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
+          Copy-Item "ffmpeg_tmp/ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe" $release
+          # exiftool Windows 独立版
+          Invoke-WebRequest -Uri "https://exiftool.org/exiftool-13.40_64.zip" -OutFile exiftool.zip
+          Expand-Archive exiftool.zip -DestinationPath exiftool_tmp
+          Copy-Item "exiftool_tmp/exiftool(-k).exe" "$release/exiftool.exe"
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath PocketMotion-windows.zip
