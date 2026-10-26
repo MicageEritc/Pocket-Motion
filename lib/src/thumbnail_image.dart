@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
+import 'tool_path.dart';
 
 /// 懒加载缩略图：首次构建时用 ffmpeg 从 MP4 抽一帧，缓存到临时目录。
 class ThumbnailImage extends StatefulWidget {
@@ -46,7 +47,7 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
       return;
     }
     // ffmpeg 抽 1.5s 处、缩放到 320 宽
-    final r = await Process.run('ffmpeg', [
+    final r = await Process.run(ToolPath.find('ffmpeg'), [
       '-y', '-ss', '1.5', '-i', widget.videoPath,
       '-frames:v', '1', '-vf', 'scale=320:-1',
       '-q:v', '5', '-update', '1', cache,

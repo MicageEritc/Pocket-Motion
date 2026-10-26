@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'models.dart';
+import 'tool_path.dart';
 
 /// Apple Live Photo 导出器。
 ///
@@ -135,7 +136,7 @@ class LivePhotoExporter {
       '${dt.second.toString().padLeft(2, '0')}';
 
   Future<void> _run(String exe, List<String> args) async {
-    final p = await Process.run(exe, args);
+    final p = await Process.run(ToolPath.find(exe), args);
     if (p.exitCode != 0) {
       _log('  !! $exe 失败: ${p.stderr}');
     }

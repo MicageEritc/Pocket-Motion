@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'models.dart';
+import 'tool_path.dart';
 
 /// Google Motion Photo 导出器。
 ///
@@ -25,7 +26,7 @@ class MotionPhotoExporter {
 
     // 1) 抽中间帧为纯 JPEG
     _log('抽帧: $base');
-    await Process.run('ffmpeg', [
+    await Process.run(ToolPath.find('ffmpeg'), [
       '-y', '-ss', '1.5', '-i', asset.path,
       '-frames:v', '1', '-q:v', '2', '-update', '1', tmpJpg,
     ]);
@@ -46,7 +47,7 @@ class MotionPhotoExporter {
 
     // 5) 写拍摄时间到 EXIF
     final shotStr = _exifTime(asset.shotAt);
-    await Process.run('exiftool', [
+    await Process.run(ToolPath.find('exiftool'), [
       '-overwrite_original',
       '-Make=DJI',
       '-Model=DJI OsmoPocket4P',
