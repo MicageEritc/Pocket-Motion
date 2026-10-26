@@ -42,6 +42,15 @@ jobs:
           flutter-version: '3.47.0'
       - run: flutter pub get
       - run: flutter build windows --release
+      - name: Bundle VC++ Runtime DLLs
+        shell: pwsh
+        run: |
+          $release = "build/windows/x64/runner/Release"
+          $dlls = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
+          foreach ($dll in $dlls) {
+            $src = "C:\Windows\System32\$dll"
+            if (Test-Path $src) { Copy-Item $src $release }
+          }
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath PocketMotion-windows.zip
