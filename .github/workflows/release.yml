@@ -4,8 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-  release:
-    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -37,9 +35,7 @@ jobs:
           cp -R "build/macos/Build/Products/Release/Pocket Motion.app" /tmp/dmg/
           ln -s /Applications /tmp/dmg/Applications
           hdiutil create -volname "Pocket Motion" -srcfolder /tmp/dmg -ov -format UDZO PocketMotion-macOS.dmg
-      - name: Upload to Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           files: PocketMotion-macOS.dmg
 
@@ -56,28 +52,19 @@ jobs:
         shell: pwsh
         run: |
           $release = "build/windows/x64/runner/Release"
-          $dlls = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
-          foreach ($dll in $dlls) {
-            $src = "C:\Windows\System32\$dll"
-            if (Test-Path $src) { Copy-Item $src $release }
+          foreach ($dll in @("vcruntime140.dll","vcruntime140_1.dll","msvcp140.dll")) {
+            Copy-Item "C:\Windows\System32\$dll" $release
           }
-      - name: Bundle ffmpeg and exiftool
+      - name: Install and bundle ffmpeg + exiftool
         shell: pwsh
         run: |
+          choco install ffmpeg exiftool -y --no-progress
           $release = "build/windows/x64/runner/Release"
-          # ffmpeg 静态版
-          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
-          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
-          Copy-Item "ffmpeg_tmp/ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe" $release
-          # exiftool Windows 独立版
-          Invoke-WebRequest -Uri "https://exiftool.org/exiftool-13.40_64.zip" -OutFile exiftool.zip
-          Expand-Archive exiftool.zip -DestinationPath exiftool_tmp
-          Copy-Item "exiftool_tmp/exiftool(-k).exe" "$release/exiftool.exe"
+          Copy-Item (Get-Command ffmpeg).Source $release
+          Copy-Item (Get-Command exiftool).Source $release
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath PocketMotion-windows.zip
-      - name: Upload to Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           files: PocketMotion-windows.zip
