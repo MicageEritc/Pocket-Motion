@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   macos:
     runs-on: macos-latest
@@ -35,6 +38,7 @@ jobs:
       - run: flutter pub get
       - run: flutter build windows --release
       - name: Zip
+        shell: pwsh
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath PocketMotion-windows.zip
       - uses: softprops/action-gh-release@v2
         with:

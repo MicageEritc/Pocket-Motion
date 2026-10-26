@@ -5,11 +5,21 @@
 ## 它解决什么问题
 
 大疆 Pocket 4P 的「实况照片」源文件是一段约 3 秒的 MP4，机内带着真实拍摄时间。
-但用 DJI Mimo 导出成 iOS 实况时，Mimo 会抽帧成 JPG、把 MP4 转成 MOV 并写入配对 UUID，
-**同时把 JPG 的 EXIF 拍摄时间清空、把 MOV 时间刷成导出那一刻**。
+但通过手机 App 导出成 iOS 实况时，会抽帧成 JPG、把 MP4 转成 MOV 并写入配对 UUID，
+**同时把 JPG 的拍摄时间清空、把 MOV 时间刷成导出那一刻**。
 
-结果脱离 iPhone 相册后，传到 NAS / 别的设备，时间就全错了。
+结果脱离手机相册后，传到 NAS / 别的设备，时间就全错了。
 Pocket Motion 直接读相机里的原始 MP4，自己识别实况、自己导出，**保留真实拍摄时间**。
+
+## 识别原理
+
+相机在 MP4 的私有数据轨里写入了拍摄配置模板字符串，例如：
+
+- 实况：`TPLG_VIDEO_LIVEPHOTO_4K_16X9_2997_KA`（含 `LIVEPHOTO`）
+- 普通视频：`TPLG_VIDEO_4K_16X9_5994_KA`（不含）
+
+程序扫描文件前部 512KB，命中 `TPLG_VIDEO_LIVEPHOTO` 即判为实况。
+在 166 个真机文件上实测：136 个实况 / 30 个视频，零误判。
 
 ## 下载
 
@@ -30,16 +40,6 @@ Pocket Motion 直接读相机里的原始 MP4，自己识别实况、自己导�
 flutter pub get
 flutter run -d macos   # 或 flutter run -d windows
 ```
-
-## 核心原理（已逆向验证）
-
-相机在 MP4 的 dbgi 私有数据轨写入拍摄配置模板：
-
-- 实况：`TPLG_VIDEO_LIVEPHOTO_4K_16X9_2997_KA`（含 `LIVEPHOTO`）
-- 普通视频：`TPLG_VIDEO_4K_16X9_5994_KA`（不含）
-
-程序扫描文件前部 512KB，命中 `TPLG_VIDEO_LIVEPHOTO` 即判为实况。
-在 166 个真机文件上实测：136 个实况 / 30 个视频，零误判。
 
 ## 导出格式
 
@@ -62,3 +62,13 @@ lib/
     motion_photo_exporter.dart  # Google Motion Photo 导出
     thumbnail_image.dart        # 视频缩略图
 ```
+
+## 声明
+
+本工具仅对用户自行拍摄、存储在相机中的原始素材文件进行读取和再封装，
+用于解决导出后拍摄时间丢失的问题。
+
+- 本工具不修改相机内的任何原始文件；
+- 本工具不对任何第三方 App 或软件进行反编译、逆向工程或破解；
+- "DJI"、"Osmo Pocket" 等名称仅为设备识别用途，商标归大疆创新所有；
+- 用户对自己拍摄的素材和导出结果自行负责。
