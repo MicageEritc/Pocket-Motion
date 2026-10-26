@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:path/path.dart' as p;
 import 'models.dart';
 import 'tool_path.dart';
 
@@ -28,8 +29,8 @@ class LivePhotoExporter {
     required String outDir,
   }) async {
     final base = asset.filename.replaceAll(RegExp(r'\.[^.]+$'), '') + 'I';
-    final outJpg = '$outDir/$base.JPG';
-    final outMov = '$outDir/$base.MOV';
+    final outJpg = p.join(outDir, '$base.JPG');
+    final outMov = p.join(outDir, '$base.MOV');
     await Directory(outDir).create(recursive: true);
 
     final uuid = _newUuid();

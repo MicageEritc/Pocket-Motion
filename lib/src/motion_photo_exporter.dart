@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:path/path.dart' as p;
 import 'models.dart';
 import 'tool_path.dart';
 
@@ -21,8 +22,8 @@ class MotionPhotoExporter {
   }) async {
     await Directory(outDir).create(recursive: true);
     final base = asset.filename.replaceAll(RegExp(r'\.[^.]+$'), '') + 'A';
-    final outPath = '$outDir/$base.jpg';
-    final tmpJpg = '$outDir/.$base.still.jpg';
+    final outPath = p.join(outDir, '$base.jpg');
+    final tmpJpg = p.join(outDir, '.$base.still.jpg');
 
     // 1) 抽中间帧为纯 JPEG
     _log('抽帧: $base');
