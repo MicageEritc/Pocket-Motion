@@ -27,7 +27,9 @@ jobs:
           cp -R build/macos/Build/Products/Release/dji_live_gallery.app /tmp/dmg/
           ln -s /Applications /tmp/dmg/Applications
           hdiutil create -volname "Pocket Motion" -srcfolder /tmp/dmg -ov -format UDZO PocketMotion-macOS.dmg
-      - uses: softprops/action-gh-release@v2
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
           files: PocketMotion-macOS.dmg
 
@@ -43,6 +45,8 @@ jobs:
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath PocketMotion-windows.zip
-      - uses: softprops/action-gh-release@v2
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
           files: PocketMotion-windows.zip
