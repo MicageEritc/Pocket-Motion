@@ -24,7 +24,7 @@ jobs:
       - name: Package DMG
         run: |
           mkdir -p /tmp/dmg
-          cp -R build/macos/Build/Products/Release/dji_live_gallery.app /tmp/dmg/
+          cp -R "build/macos/Build/Products/Release/Pocket Motion.app" /tmp/dmg/
           ln -s /Applications /tmp/dmg/Applications
           hdiutil create -volname "Pocket Motion" -srcfolder /tmp/dmg -ov -format UDZO PocketMotion-macOS.dmg
       - name: Upload to Release
