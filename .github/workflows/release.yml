@@ -9,6 +9,9 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   macos:
     runs-on: macos-latest
@@ -22,13 +25,23 @@ jobs:
       - name: Install and bundle ffmpeg + exiftool
         run: |
           brew install ffmpeg exiftool
-          RES="build/macos/Build/Products/Release/Pocket Motion.app/Contents/Resources"
+          APP="build/macos/Build/Products/Release/Pocket Motion.app"
+          RES="$APP/Contents/Resources"
           mkdir -p "$RES/bin"
           cp "$(which ffmpeg)" "$RES/bin/ffmpeg"
           chmod +x "$RES/bin/ffmpeg"
           EXIFTOOL_LIB=$(dirname $(dirname $(readlink -f $(which exiftool))))/libexec
           cp -R "$EXIFTOOL_LIB" "$RES/exiftool_lib"
+          mkdir -p "$RES/exiftool_lib/bin/lib"
+          if [ -d "$RES/exiftool_lib/lib/perl5" ]; then
+            cp -R "$RES/exiftool_lib/lib/perl5/"* "$RES/exiftool_lib/bin/lib/"
+          fi
           chmod +x "$RES/exiftool_lib/bin/exiftool"
+          "$RES/exiftool_lib/bin/exiftool" -ver
+          # 重新对整个 .app 签名，防止修改 Resources 后因签名封印失效被 macOS 判定为“文件已损坏”
+          xattr -cr "$APP"
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP"
       - name: Package DMG
         run: |
           mkdir -p /tmp/dmg
@@ -36,6 +49,7 @@ jobs:
           ln -s /Applications /tmp/dmg/Applications
           hdiutil create -volname "Pocket Motion" -srcfolder /tmp/dmg -ov -format UDZO PocketMotion-macOS.dmg
       - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           files: PocketMotion-macOS.dmg
 
@@ -51,26 +65,70 @@ jobs:
       - name: Bundle VC++ Runtime DLLs
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $release = "build/windows/x64/runner/Release"
-          foreach ($dll in @("vcruntime140.dll","vcruntime140_1.dll","msvcp140.dll")) {
-            Copy-Item "C:\Windows\System32\$dll" $release
+          foreach ($dll in @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")) {
+            $src = "C:\Windows\System32\$dll"
+            if (Test-Path -LiteralPath $src) {
+              Copy-Item -LiteralPath $src -Destination $release -Force
+            }
           }
       - name: Bundle ffmpeg and exiftool
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
           $release = "build/windows/x64/runner/Release"
-          # ffmpeg: BtbN 静态版（GitHub releases，runner 访问快）
-          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
-          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
-          $ffBin = Get-ChildItem ffmpeg_tmp -Recurse -Directory -Filter "bin" | Select-Object -First 1
-          Copy-Item "$($ffBin.FullName)/*" $release
-          # exiftool: Windows 独立 exe（SourceForge 托管）
-          Invoke-WebRequest -Uri "https://sourceforge.net/projects/exiftool/files/exiftool-13.59_64.zip/download" -OutFile exiftool.zip
-          Expand-Archive exiftool.zip -DestinationPath exiftool_tmp
-          Copy-Item "exiftool_tmp/exiftool(-k).exe" "$release/exiftool.exe"
+
+          # 1. 下载并解压 ffmpeg (BtbN 静态构建)
+          curl.exe -fL --retry 3 "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -o ffmpeg.zip
+          Expand-Archive -LiteralPath ffmpeg.zip -DestinationPath ffmpeg_tmp -Force
+          $ffExe = Get-ChildItem ffmpeg_tmp -Recurse -File -Filter "ffmpeg.exe" | Select-Object -First 1
+          if (-not $ffExe) { throw "ffmpeg.exe not found in archive" }
+          Copy-Item -LiteralPath $ffExe.FullName -Destination "$release/ffmpeg.exe" -Force
+
+          # 2. 下载并解压 exiftool（压缩包内含顶层目录 exiftool-x.xx_64/，包含 exiftool(-k).exe 与依赖目录 exiftool_files/）
+          $exifDownloaded = $false
+          $urls = @(
+            "https://downloads.sourceforge.net/project/exiftool/exiftool-13.59_64.zip",
+            "https://oliverbetz.de/cms/files/Artikel/ExifTool-for-Windows/exiftool-13.59_64.zip"
+          )
+          foreach ($u in $urls) {
+            try {
+              curl.exe -fL --retry 3 -A "Mozilla/5.0" $u -o exiftool.zip
+              if ((Test-Path exiftool.zip) -and ((Get-Item exiftool.zip).Length -gt 1000000)) {
+                Expand-Archive -LiteralPath exiftool.zip -DestinationPath exiftool_tmp -Force
+                $exifDownloaded = $true
+                break
+              }
+            } catch {
+              Write-Host "Download from $u failed, trying next..."
+            }
+          }
+
+          if (-not $exifDownloaded) {
+            choco install exiftool -y --no-progress
+            $chocoRoot = "C:\ProgramData\chocolatey\lib\exiftool\tools"
+            $exifExe = Get-ChildItem $chocoRoot -Recurse -File | Where-Object { $_.Name -like "exiftool*.exe" } | Select-Object -First 1
+          } else {
+            $exifExe = Get-ChildItem exiftool_tmp -Recurse -File | Where-Object { $_.Name -like "exiftool*.exe" } | Select-Object -First 1
+          }
+
+          if (-not $exifExe) { throw "exiftool executable not found" }
+          Copy-Item -LiteralPath $exifExe.FullName -Destination "$release/exiftool.exe" -Force
+          $exifFiles = Join-Path $exifExe.DirectoryName "exiftool_files"
+          if (Test-Path -LiteralPath $exifFiles) {
+            Copy-Item -LiteralPath $exifFiles -Destination "$release/exiftool_files" -Recurse -Force
+          }
+
+          # 验证打包后的工具可直接运行
+          & "$release/ffmpeg.exe" -version | Select-Object -First 1
+          & "$release/exiftool.exe" -ver
       - name: Zip
         shell: pwsh
-        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath PocketMotion-windows.zip
+        run: |
+          7z a -tzip PocketMotion-windows.zip ./build/windows/x64/runner/Release/*
       - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           files: PocketMotion-windows.zip
