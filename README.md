@@ -45,7 +45,7 @@
 
 | 导出格式 | 产物文件 | 写入的元数据 | 适用平台与相册 |
 | :--- | :--- | :--- | :--- |
-| **Apple Live Photo** | `<名>I.JPG` + `<名>I.MOV` | `Make=DJI`、`Model=DJI OsmoPocket4P`、原始拍摄时间（EXIF + QuickTime `mvhd`/`tkhd`/`mdhd`）、配对 `ContentIdentifier` UUID | iPhone / iPad / macOS 系统相册、群晖 Synology Photos、Immich、MT Photos 等 |
+| **Apple Live Photo** | `<名>I.JPG` + `<名>I.MOV` | `Make=DJI`、`Model=DJI OsmoPocket4P`、原始拍摄时间（EXIF + QuickTime `mvhd`/`tkhd`/`mdhd`）、配对 `ContentIdentifier` UUID | iPhone / iPad / macOS 系统相册、绿联云、极空间、群晖 Synology Photos、Immich、MT Photos 等 |
 | **Google Motion Photo** | `<名>A.jpg`（单文件内嵌视频） | `Make=DJI`、`Model=DJI OsmoPocket4P`、原始拍摄时间、`GCamera:MotionPhoto` XMP 容器描述 | Google Photos、小米 / OPPO / vivo / 三星等主流 Android 相册及支持动态照片的 NAS |
 
 ## 从源码构建
