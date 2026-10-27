@@ -64,8 +64,8 @@ jobs:
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
           $ffBin = Get-ChildItem ffmpeg_tmp -Recurse -Directory -Filter "bin" | Select-Object -First 1
           Copy-Item "$($ffBin.FullName)/*" $release
-          # exiftool: Windows 独立 exe（最新版 13.59）
-          Invoke-WebRequest -Uri "https://exiftool.org/exiftool-13.59_64.zip" -OutFile exiftool.zip
+          # exiftool: Windows 独立 exe（SourceForge 托管）
+          Invoke-WebRequest -Uri "https://sourceforge.net/projects/exiftool/files/exiftool-13.59_64.zip/download" -OutFile exiftool.zip
           Expand-Archive exiftool.zip -DestinationPath exiftool_tmp
           Copy-Item "exiftool_tmp/exiftool(-k).exe" "$release/exiftool.exe"
       - name: Zip
