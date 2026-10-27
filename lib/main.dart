@@ -382,7 +382,7 @@ class _PathCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final name = path.split('/').where((s) => s.isNotEmpty).lastOrNull ?? path;
+    final name = path.split(RegExp(r'[/\\]')).where((s) => s.isNotEmpty).lastOrNull ?? path;
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),

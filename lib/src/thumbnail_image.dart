@@ -38,8 +38,8 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
 
   Future<void> _ensureThumb() async {
     final dir = await _cacheDir();
-    // 用文件名做缓存键
-    final key = widget.videoPath.split('/').last.replaceAll('.', '_');
+    // 用文件名做缓存键（兼容 Windows 反斜杠路径）
+    final key = p.basename(widget.videoPath).replaceAll('.', '_');
     final cache = p.join(dir, '$key.jpg');
     final f = File(cache);
     if (await f.exists()) {

@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:path/path.dart' as p;
 import 'models.dart';
 
 /// 媒体扫描器：从相机 DCIM 目录识别 照片/视频/实况。
@@ -27,7 +28,7 @@ class MediaScanner {
 
     for (final e in entities) {
       if (e is! File) continue;
-      final name = e.path.split('/').last;
+      final name = p.basename(e.path);
       final ext = name.split('.').last.toLowerCase();
       final stat = await e.stat();
 

@@ -80,12 +80,13 @@ class LivePhotoExporter {
 
     // 5) 文件系统时间归位
     if (asset.shotAt != null) {
-      final ts = asset.shotAt!.millisecondsSinceEpoch ~/ 1000;
-      for (final p in [outJpg, outMov]) {
-        await _run('SetFile', ['-d', _macTime(asset.shotAt!), p]);
+      for (final filePath in [outJpg, outMov]) {
+        if (Platform.isMacOS) {
+          await _run('SetFile', ['-d', _macTime(asset.shotAt!), filePath]);
+        }
         // utime 兜底
         try {
-          final f = File(p);
+          final f = File(filePath);
           await f.setLastModified(asset.shotAt!);
         } catch (_) {}
       }
