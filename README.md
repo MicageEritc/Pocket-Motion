@@ -25,7 +25,7 @@ Pocket Motion 直接读相机里的原始 MP4，自己识别实况、自己导�
 
 在 [Releases](../../releases) 下载：
 - **macOS**：`PocketMotion-macOS.dmg`，拖进 Applications（未签名，首次右键→打开）
-- **Windows**：`PocketMotion-windows.zip`，解压后运行 `dji_live_gallery.exe`
+- **Windows**：`PocketMotion-windows.zip`，解压后运行 `Pocket Motion.exe`
 
 ## 运行依赖
 

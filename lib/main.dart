@@ -1,6 +1,8 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:path/path.dart' as p;
 import 'src/models.dart';
 import 'src/media_scanner.dart';
 import 'src/live_photo_exporter.dart';
@@ -35,8 +37,8 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final _scanner = MediaScanner();
-  String _cameraDir = '/Volumes/Pocket4P/DCIM/DJI_001';
-  String _outDir = '/Users/micage/Downloads/照片测试/live_out';
+  late String _cameraDir = _defaultCameraDir();
+  late String _outDir = _defaultOutDir();
 
   List<MediaAsset> _assets = [];
   MediaKind? _filter = MediaKind.livePhoto; // 默认只显示实况
@@ -48,6 +50,72 @@ class _HomePageState extends State<HomePage> {
   int _totalCount = 0;
   int _success = 0;
   int _fail = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedDirs();
+  }
+
+  static String _defaultCameraDir() {
+    if (Platform.isWindows) {
+      return r'D:\DCIM\DJI_001';
+    }
+    return '/Volumes/Pocket4P/DCIM/DJI_001';
+  }
+
+  static String _defaultOutDir() {
+    if (Platform.isWindows) {
+      final userProfile = Platform.environment['USERPROFILE'] ?? r'C:\Users\Public';
+      return p.join(userProfile, 'Downloads', 'PocketMotion_Out');
+    }
+    final home = Platform.environment['HOME'] ?? '/Users/Shared';
+    return p.join(home, 'Downloads', 'live_out');
+  }
+
+  static File _configFile() {
+    if (Platform.isWindows) {
+      final appData = Platform.environment['APPDATA'] ??
+          Platform.environment['USERPROFILE'] ??
+          Directory.systemTemp.path;
+      return File(p.join(appData, 'PocketMotion', 'config.json'));
+    }
+    final home = Platform.environment['HOME'] ?? Directory.systemTemp.path;
+    return File(p.join(home, 'Library', 'Application Support', 'PocketMotion', 'config.json'));
+  }
+
+  Future<void> _loadSavedDirs() async {
+    try {
+      final file = _configFile();
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        final data = jsonDecode(content);
+        if (data is Map) {
+          final savedCamera = data['cameraDir'];
+          final savedOut = data['outDir'];
+          setState(() {
+            if (savedCamera is String && savedCamera.trim().isNotEmpty) {
+              _cameraDir = savedCamera.trim();
+            }
+            if (savedOut is String && savedOut.trim().isNotEmpty) {
+              _outDir = savedOut.trim();
+            }
+          });
+        }
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _saveDirs() async {
+    try {
+      final file = _configFile();
+      await file.parent.create(recursive: true);
+      await file.writeAsString(jsonEncode({
+        'cameraDir': _cameraDir,
+        'outDir': _outDir,
+      }));
+    } catch (_) {}
+  }
 
   List<MediaAsset> get _liveAssets =>
       _assets.where((a) => a.kind == MediaKind.livePhoto).toList();
@@ -70,13 +138,23 @@ class _HomePageState extends State<HomePage> {
   Future<void> _pickCameraDir() async {
     final dir = await FilePicker.platform.getDirectoryPath(
         dialogTitle: '选择相机素材目录');
-    if (dir != null) { setState(() => _cameraDir = dir); _selected.clear(); }
+    if (dir != null) {
+      setState(() {
+        _cameraDir = dir;
+        _selected.clear();
+      });
+      await _saveDirs();
+      await _scan();
+    }
   }
 
   Future<void> _pickOutDir() async {
     final dir = await FilePicker.platform.getDirectoryPath(
         dialogTitle: '选择导出目录');
-    if (dir != null) setState(() => _outDir = dir);
+    if (dir != null) {
+      setState(() => _outDir = dir);
+      await _saveDirs();
+    }
   }
 
   List<MediaAsset> get _picked => _liveAssets
@@ -240,7 +318,6 @@ class _HomePageState extends State<HomePage> {
           border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
           color: Colors.white),
         child: LayoutBuilder(builder: (context, constraints) {
-          final wide = constraints.maxWidth > 720;
           final stats = Row(mainAxisSize: MainAxisSize.min, children: [
             _statChip('可转换实况', _liveAssets.length, Colors.teal),
             const SizedBox(width: 12),
