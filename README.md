@@ -31,7 +31,7 @@
     ```bash
     xattr -cr "/Applications/Pocket Motion.app"
     ```
-- **Windows**：下载 `PocketMotion-windows.zip`，解压到任意目录（需保留同级文件与子目录结构），双击运行 `Pocket Motion.exe`。
+- **Windows**：下载 `PocketMotion-windows.zip`，解压到任意目录，双击运行 `PocketMotion.exe`（窗口与任务栏显示名称为 **Pocket Motion**）。
 
 ## 使用方法
 
