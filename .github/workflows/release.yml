@@ -59,13 +59,13 @@ jobs:
         shell: pwsh
         run: |
           $release = "build/windows/x64/runner/Release"
-          # ffmpeg: 完整静态版
-          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          # ffmpeg: BtbN 静态版（GitHub releases，runner 访问快）
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
           $ffBin = Get-ChildItem ffmpeg_tmp -Recurse -Directory -Filter "bin" | Select-Object -First 1
           Copy-Item "$($ffBin.FullName)/*" $release
-          # exiftool: Windows 独立 exe
-          Invoke-WebRequest -Uri "https://exiftool.org/exiftool-13.55_64.zip" -OutFile exiftool.zip
+          # exiftool: Windows 独立 exe（最新版 13.59）
+          Invoke-WebRequest -Uri "https://exiftool.org/exiftool-13.59_64.zip" -OutFile exiftool.zip
           Expand-Archive exiftool.zip -DestinationPath exiftool_tmp
           Copy-Item "exiftool_tmp/exiftool(-k).exe" "$release/exiftool.exe"
       - name: Zip
