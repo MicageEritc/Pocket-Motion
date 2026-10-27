@@ -1,18 +1,18 @@
 import 'dart:io';
 import 'dart:math';
-import 'dart:typed_data';
 import 'package:path/path.dart' as p;
+import 'media_metadata.dart';
 import 'models.dart';
 import 'tool_path.dart';
 
 /// Apple Live Photo 导出器。
 ///
-/// 流程（已用真机验证）：
-/// 1. ffmpeg 抽原 MP4 中间帧为 JPG；
-/// 2. 原 MP4 不重编码，直接复制为 .MOV；
-/// 3. 构造最小 Apple iOS MakerNote（含 0x0011 ContentIdentifier），由 exiftool 写入 JPG 的 Apple MakerNote 与拍摄时间；
-/// 4. exiftool 给 MOV 写拍摄时间 + Keys:ContentIdentifier；
-/// 两端 UUID 一致，iPhone / macOS 相册与 NAS（群晖 Synology Photos / Immich 等）即识别为一组实况。
+/// 流程（纯 Dart 写入 EXIF / MakerNote / QuickTime MOV 元数据，不依赖外部 exiftool / Perl 进程）：
+/// 1. 从源 MP4 解析设备品牌/型号（如 DJI / DJI OsmoPocket4P）与拍摄时间；
+/// 2. ffmpeg 抽原 MP4 中间帧为 JPG；
+/// 3. 纯 Dart 向 JPG 注入标准 TIFF/EXIF APP1 段（Make、Model、拍摄时间 + Apple iOS MakerNote 0x0011 ContentIdentifier）；
+/// 4. 纯 Dart 生成 .MOV，更新 moov 内 mvhd/tkhd/mdhd 时间戳并注入 QuickTime mdta (Keys:ContentIdentifier / Make / Model / CreationDate)；
+/// 两端 UUID 一致，iPhone / macOS 相册与 NAS（群晖 Synology Photos / Immich 等）即识别为一组动态实况照片。
 class LivePhotoExporter {
   final String? seedJpgPath;
   final void Function(String log)? onLog;
@@ -31,103 +31,55 @@ class LivePhotoExporter {
     final base = asset.filename.replaceAll(RegExp(r'\.[^.]+$'), '') + 'I';
     final outJpg = p.join(outDir, '$base.JPG');
     final outMov = p.join(outDir, '$base.MOV');
-    final tmpMakerNote = p.join(outDir, '.$base.makernote.bin');
     await Directory(outDir).create(recursive: true);
 
     final uuid = _newUuid();
-    final shotStr = _exifTime(asset.shotAt);
+    final mp4Info = await MediaMetadata.extractFromMp4(asset.path);
+    final shotAt = asset.shotAt ?? mp4Info.creationTime;
 
     // 1) 抽中间帧（实况约3秒，中点取1.5s）
-    _log('抽帧: $base');
+    _log('抽帧: $base (${mp4Info.make} ${mp4Info.model})');
     await _run('ffmpeg', [
       '-y', '-ss', '1.5', '-i', asset.path,
       '-frames:v', '1', '-q:v', '2', '-update', '1', outJpg,
     ]);
 
-    // 2) 原 MP4 复制为 MOV（零重编码）
-    File(asset.path).copySync(outMov);
+    // 2) 纯 Dart 向 JPG 写入 EXIF（设备品牌/型号、拍摄时间）与 Apple MakerNote (ContentIdentifier = uuid)
+    final rawJpg = await File(outJpg).readAsBytes();
+    final exifApp1 = MediaMetadata.buildExifApp1Segment(
+      make: mp4Info.make,
+      model: mp4Info.model,
+      shotAt: shotAt,
+      livePhotoUuid: uuid,
+    );
+    final patchedJpg = MediaMetadata.injectIntoJpeg(rawJpg, [exifApp1]);
+    await File(outJpg).writeAsBytes(patchedJpg);
 
-    // 3) JPG：直接注入内置构造的最小 Apple MakerNote（含 ContentIdentifier = uuid），无需外部种子 JPG
-    await File(tmpMakerNote).writeAsBytes(_buildAppleMakerNote(uuid));
-    try {
-      await _run('exiftool', [
-        '-overwrite_original',
-        '-api', 'QuickTimeUTC=1',
-        '-MakerNoteApple<=$tmpMakerNote',
-        '-Make=Apple',
-        '-Model=DJI OsmoPocket4P',
-        if (shotStr != null) ...[
-          '-DateTimeOriginal=$shotStr',
-          '-DateTimeDigitized=$shotStr',
-          '-DateTime=$shotStr',
-        ],
-        outJpg,
-      ]);
-    } finally {
-      try {
-        File(tmpMakerNote).deleteSync();
-      } catch (_) {}
-    }
+    // 3) 纯 Dart 生成 MOV 并写入 QuickTime Keys:ContentIdentifier、设备信息与轨道时间戳
+    await MediaMetadata.writeMovLivePhotoMetadata(
+      srcMp4Path: asset.path,
+      outMovPath: outMov,
+      uuid: uuid,
+      make: mp4Info.make,
+      model: mp4Info.model,
+      shotAt: shotAt,
+    );
 
-    // 4) MOV：写时间和 UUID
-    await _run('exiftool', [
-      '-overwrite_original',
-      '-api', 'QuickTimeUTC=1',
-      if (shotStr != null) ...[
-        '-CreateDate=$shotStr',
-        '-ModifyDate=$shotStr',
-        '-TrackCreateDate=$shotStr',
-        '-MediaCreateDate=$shotStr',
-      ],
-      '-Keys:ContentIdentifier=$uuid',
-      outMov,
-    ]);
-
-    // 5) 文件系统时间归位
-    if (asset.shotAt != null) {
+    // 4) 文件系统时间归位
+    if (shotAt != null) {
       for (final filePath in [outJpg, outMov]) {
         if (Platform.isMacOS) {
-          await _run('SetFile', ['-d', _macTime(asset.shotAt!), filePath]);
+          await _run('SetFile', ['-d', _macTime(shotAt), filePath]);
         }
-        // utime 兜底
         try {
           final f = File(filePath);
-          await f.setLastModified(asset.shotAt!);
+          await f.setLastModified(shotAt);
         } catch (_) {}
       }
     }
 
     _log('完成: $base  (UUID $uuid)');
     return (outJpg, outMov);
-  }
-
-  /// 构造包含 Tag 0x0011 (ContentIdentifier) 的最小 Apple iOS MakerNote 二进制块（70 字节）。
-  ///
-  /// 结构：
-  /// - 0..13 (14B): "Apple iOS\0\0\x01MM" (大端序 Apple MakerNote 头)
-  /// - 14..15 (2B): 0x0001 (1 个 IFD 条目)
-  /// - 16..27 (12B): Tag=0x0011, Type=2(ASCII), Count=37, ValueOffset=32(0x00000020)
-  /// - 28..31 (4B): 0x00000000 (Next IFD offset)
-  /// - 32..69 (38B): 36 字节 UUID 字符串 + "\0\0"
-  static Uint8List _buildAppleMakerNote(String uuid) {
-    final b = BytesBuilder();
-    // "Apple iOS\0\0\x01MM"
-    b.add([
-      0x41, 0x70, 0x70, 0x6C, 0x65, 0x20, 0x69, 0x4F, 0x53, 0x00,
-      0x00, 0x01, 0x4D, 0x4D,
-    ]);
-    // Entry count = 1, Tag = 0x0011, Type = 2 (ASCII), Count = 37, Offset = 32, NextIFD = 0
-    b.add([
-      0x00, 0x01,
-      0x00, 0x11,
-      0x00, 0x02,
-      0x00, 0x00, 0x00, 0x25,
-      0x00, 0x00, 0x00, 0x20,
-      0x00, 0x00, 0x00, 0x00,
-    ]);
-    b.add(uuid.codeUnits);
-    b.add([0x00, 0x00]);
-    return b.toBytes();
   }
 
   static final Random _rng = Random();
@@ -147,15 +99,6 @@ class LivePhotoExporter {
       for (var i = 10; i < 16; i++) hex(r[i]),
     ].join().toUpperCase();
   }
-
-  static String? _exifTime(DateTime? dt) => dt == null
-      ? null
-      : '${dt.year.toString().padLeft(4, '0')}:'
-          '${dt.month.toString().padLeft(2, '0')}:'
-          '${dt.day.toString().padLeft(2, '0')} '
-          '${dt.hour.toString().padLeft(2, '0')}:'
-          '${dt.minute.toString().padLeft(2, '0')}:'
-          '${dt.second.toString().padLeft(2, '0')}';
 
   static String _macTime(DateTime dt) =>
       '${dt.month.toString().padLeft(2, '0')}/'

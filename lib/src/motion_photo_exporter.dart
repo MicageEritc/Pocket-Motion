@@ -1,20 +1,20 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:path/path.dart' as p;
+import 'media_metadata.dart';
 import 'models.dart';
 import 'tool_path.dart';
 
 /// Google Motion Photo 导出器。
 ///
-/// 输出**单个 .jpg 文件**：结构 = [JPEG(含XMP标记)] + [MP4字节]
-/// XMP 用 Google 的 gcamera 命名空间标记视频偏移，
-/// Google Photos / Android 相册据此识别为动态照片。
-///
-/// 参考：GCamera:MicroVideo / MicroVideoOffset（MP4 在文件末尾的字节偏移）。
+/// 输出**单个 .jpg 文件**：结构 = [JPEG(含标准 EXIF APP1 + Google XMP APP1)] + [MP4字节]
+/// 纯 Dart 直接从源 MP4 提取设备型号与拍摄时间并写入 EXIF，不依赖外部 exiftool 进程。
 class MotionPhotoExporter {
   final void Function(String log)? onLog;
   MotionPhotoExporter({this.onLog});
-  void _log(String s) { onLog?.call(s); }
+  void _log(String s) {
+    onLog?.call(s);
+  }
 
   Future<String> export({
     required MediaAsset asset,
@@ -25,45 +25,50 @@ class MotionPhotoExporter {
     final outPath = p.join(outDir, '$base.jpg');
     final tmpJpg = p.join(outDir, '.$base.still.jpg');
 
+    final mp4Info = await MediaMetadata.extractFromMp4(asset.path);
+    final shotAt = asset.shotAt ?? mp4Info.creationTime;
+
     // 1) 抽中间帧为纯 JPEG
-    _log('抽帧: $base');
+    _log('抽帧: $base (${mp4Info.make} ${mp4Info.model})');
     await Process.run(ToolPath.find('ffmpeg'), [
       '-y', '-ss', '1.5', '-i', asset.path,
       '-frames:v', '1', '-q:v', '2', '-update', '1', tmpJpg,
     ]);
 
-    // 2) 读静态 JPEG 和原 MP4
-    var jpg = await File(tmpJpg).readAsBytes();
-    final mp4 = await File(asset.path).readAsBytes();
+    try {
+      // 2) 读静态 JPEG 和原 MP4
+      var jpg = await File(tmpJpg).readAsBytes();
+      final mp4 = await File(asset.path).readAsBytes();
 
-    // 3) 构造 XMP 段并插入 JPEG 的 SOI 之后（文件开头）
-    final xmp = _buildXmpSegment(mp4Length: mp4.length);
-    jpg = _insertAfterSoi(jpg, xmp);
+      // 3) 纯 Dart 构造 EXIF APP1 段（设备品牌/型号、拍摄时间）与 Google Motion Photo XMP APP1 段并注入 SOI 之后
+      final exifApp1 = MediaMetadata.buildExifApp1Segment(
+        make: mp4Info.make,
+        model: mp4Info.model,
+        software: 'DJI Live Gallery',
+        shotAt: shotAt,
+      );
+      final xmpApp1 = _buildXmpSegment(mp4Length: mp4.length);
+      jpg = MediaMetadata.injectIntoJpeg(jpg, [exifApp1, xmpApp1]);
 
-    // 4) 拼接：JPEG + MP4
-    final out = BytesBuilder()
-      ..add(jpg)
-      ..add(mp4);
-    await File(outPath).writeAsBytes(out.toBytes());
+      // 4) 拼接：JPEG + MP4
+      final out = BytesBuilder()
+        ..add(jpg)
+        ..add(mp4);
+      await File(outPath).writeAsBytes(out.toBytes());
+    } finally {
+      try {
+        File(tmpJpg).deleteSync();
+      } catch (_) {}
+    }
 
-    // 5) 写拍摄时间到 EXIF
-    final shotStr = _exifTime(asset.shotAt);
-    await Process.run(ToolPath.find('exiftool'), [
-      '-overwrite_original',
-      '-Make=DJI',
-      '-Model=DJI OsmoPocket4P',
-      '-Software=DJI Live Gallery',
-      if (shotStr != null) ...[
-        '-DateTimeOriginal=$shotStr',
-        '-DateTimeDigitized=$shotStr',
-      ],
-      outPath,
-    ]);
+    // 5) 文件系统时间归位
+    if (shotAt != null) {
+      try {
+        await File(outPath).setLastModified(shotAt);
+      } catch (_) {}
+    }
 
-    // 清理临时抽帧
-    try { File(tmpJpg).deleteSync(); } catch (_) {}
-
-    _log('完成: $base.jpg (Motion Photo, 内嵌 ${mp4.length} 字节视频)');
+    _log('完成: $base.jpg (Motion Photo)');
     return outPath;
   }
 
@@ -117,26 +122,4 @@ class MotionPhotoExporter {
       ..add(content);
     return b.toBytes();
   }
-
-  /// 在 JPEG 开头 SOI(FFD8) 之后插入 XMP 段。
-  /// 关键：Google/exiftool 只认 JPEG 前部的 XMP，插在 EOI 前会被忽略。
-  Uint8List _insertAfterSoi(Uint8List jpg, Uint8List segment) {
-    if (jpg.length < 2 || jpg[0] != 0xFF || jpg[1] != 0xD8) {
-      return Uint8List.fromList([...segment, ...jpg]);
-    }
-    return Uint8List.fromList([
-      jpg[0], jpg[1],
-      ...segment,
-      ...jpg.sublist(2),
-    ]);
-  }
-
-  static String? _exifTime(DateTime? dt) => dt == null
-      ? null
-      : '${dt.year.toString().padLeft(4, '0')}:'
-          '${dt.month.toString().padLeft(2, '0')}:'
-          '${dt.day.toString().padLeft(2, '0')} '
-          '${dt.hour.toString().padLeft(2, '0')}:'
-          '${dt.minute.toString().padLeft(2, '0')}:'
-          '${dt.second.toString().padLeft(2, '0')}';
 }
