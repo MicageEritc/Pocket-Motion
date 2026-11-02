@@ -7,12 +7,12 @@ import 'tool_path.dart';
 
 /// Apple Live Photo 导出器。
 ///
-/// 流程（纯 Dart 写入 EXIF / MakerNote / QuickTime MOV 元数据，不依赖外部 exiftool / Perl 进程）：
+/// 流程（纯 Dart 写入 EXIF / MakerNote / QuickTime MOV 定时元数据轨，不依赖外部 exiftool / Perl 进程）：
 /// 1. 从源 MP4 解析设备品牌/型号（如 DJI / DJI OsmoPocket4P）与拍摄时间；
-/// 2. ffmpeg 抽原 MP4 中间帧为 JPG；
-/// 3. 纯 Dart 向 JPG 注入标准 TIFF/EXIF APP1 段（Make、Model、拍摄时间 + Apple iOS MakerNote 0x0011 ContentIdentifier）；
-/// 4. 纯 Dart 生成 .MOV，更新 moov 内 mvhd/tkhd/mdhd 时间戳并注入 QuickTime mdta (Keys:ContentIdentifier / Make / Model / CreationDate)；
-/// 两端 UUID 一致，iPhone / macOS 相册与 NAS（群晖 Synology Photos / Immich 等）即识别为一组动态实况照片。
+/// 2. ffmpeg 抽原 MP4 1.5s 中间帧为 JPG，并将原 MP4 无损重封装为纯净 QuickTime MOV 容器（剔除私有 dbgi 轨）；
+/// 3. 纯 Dart 向 JPG 注入标准 TIFF/EXIF APP1 段（Make、Model、拍摄时间、宽高 + Apple MakerNote ContentIdentifier / RunTime / AccelerationVector / LivePhotoVideoIndex）；
+/// 4. 纯 Dart 向 .MOV 注入 com.apple.quicktime.still-image-time (mebx) 定时元数据轨与 QuickTime mdta 元数据；
+/// 支持 iPhone 相册滑动自动播放、相册编辑自由更换封面帧，以及大疆 Mimo 二次编辑封面不跳帧。
 class LivePhotoExporter {
   final String? seedJpgPath;
   final void Function(String log)? onLog;
@@ -31,6 +31,7 @@ class LivePhotoExporter {
     final base = asset.filename.replaceAll(RegExp(r'\.[^.]+$'), '') + 'I';
     final outJpg = p.join(outDir, '$base.JPG');
     final outMov = p.join(outDir, '$base.MOV');
+    final tmpRemuxMov = p.join(outDir, '.$base.remux.mov');
     await Directory(outDir).create(recursive: true);
 
     final uuid = _newUuid();
@@ -44,28 +45,52 @@ class LivePhotoExporter {
       '-frames:v', '1', '-q:v', '2', '-update', '1', outJpg,
     ]);
 
-    // 2) 纯 Dart 向 JPG 写入 EXIF（设备品牌/型号、拍摄时间）与 Apple MakerNote (ContentIdentifier = uuid)
+    // 2) 纯 Dart 向 JPG 写入 EXIF（设备品牌/型号、拍摄时间、宽高）与完整 Apple MakerNote
     final rawJpg = await File(outJpg).readAsBytes();
+    final dims = MediaMetadata.extractJpegDimensions(rawJpg);
     final exifApp1 = MediaMetadata.buildExifApp1Segment(
       make: mp4Info.make,
       model: mp4Info.model,
       shotAt: shotAt,
       livePhotoUuid: uuid,
+      imageWidth: dims?.$1,
+      imageHeight: dims?.$2,
     );
     final patchedJpg = MediaMetadata.injectIntoJpeg(rawJpg, [exifApp1]);
     await File(outJpg).writeAsBytes(patchedJpg);
 
-    // 3) 纯 Dart 生成 MOV 并写入 QuickTime Keys:ContentIdentifier、设备信息与轨道时间戳
-    await MediaMetadata.writeMovLivePhotoMetadata(
-      srcMp4Path: asset.path,
-      outMovPath: outMov,
-      uuid: uuid,
-      make: mp4Info.make,
-      model: mp4Info.model,
-      shotAt: shotAt,
-    );
+    // 3) 先用 ffmpeg 零重编码重封装为标准 QuickTime MOV（仅保留视频轨与音频轨，清理相机私有数据轨）
+    await _run('ffmpeg', [
+      '-y',
+      '-i', asset.path,
+      '-map', '0:v:0',
+      '-map', '0:a?',
+      '-c', 'copy',
+      '-f', 'mov',
+      tmpRemuxMov,
+    ]);
+    final movSourcePath = File(tmpRemuxMov).existsSync() ? tmpRemuxMov : asset.path;
 
-    // 4) 文件系统时间归位
+    // 4) 纯 Dart 生成最终 MOV：写入 still-image-time 定时元数据轨、QuickTime Keys:ContentIdentifier、设备信息与轨道时间戳
+    try {
+      await MediaMetadata.writeMovLivePhotoMetadata(
+        srcMp4Path: movSourcePath,
+        outMovPath: outMov,
+        uuid: uuid,
+        make: mp4Info.make,
+        model: mp4Info.model,
+        shotAt: shotAt,
+        coverTimeSeconds: 1.5,
+      );
+    } finally {
+      try {
+        if (File(tmpRemuxMov).existsSync()) {
+          File(tmpRemuxMov).deleteSync();
+        }
+      } catch (_) {}
+    }
+
+    // 5) 文件系统时间归位
     if (shotAt != null) {
       for (final filePath in [outJpg, outMov]) {
         if (Platform.isMacOS) {
@@ -85,7 +110,6 @@ class LivePhotoExporter {
   static final Random _rng = Random();
 
   static String _newUuid() {
-    // 标准 UUID v4，大写带连字符
     final r = List<int>.generate(16, (_) => _rng.nextInt(256));
     r[6] = (r[6] & 0x0f) | 0x40;
     r[8] = (r[8] & 0x3f) | 0x80;

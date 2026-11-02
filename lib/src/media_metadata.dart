@@ -17,10 +17,26 @@ class Mp4DeviceInfo {
   });
 }
 
+/// 视频轨时间基与帧时长信息
+class _VideoTrackTiming {
+  final int trackId;
+  final int videoTimescale;
+  final int videoDuration;
+  final int frameDelta;
+
+  const _VideoTrackTiming({
+    required this.trackId,
+    required this.videoTimescale,
+    required this.videoDuration,
+    required this.frameDelta,
+  });
+}
+
 /// 纯 Dart 跨平台媒体元数据引擎（不依赖外部 Perl / exiftool 进程，彻底杜绝 Windows 中文路径与运行库缺失问题）：
 /// 1. 从源 MP4 提取真实设备品牌/型号、拍摄时间与 GPS 信息；
-/// 2. 直接构造标准 TIFF/EXIF APP1 段（含 IFD0、ExifIFD 及 Apple iOS MakerNote 0x0011 ContentIdentifier）写入 JPG；
-/// 3. 直接在 MOV/MP4 的 moov 原子中更新 mvhd/tkhd/mdhd 时间戳并注入 Apple QuickTime mdta (Keys:ContentIdentifier / Make / Model / CreationDate)。
+/// 2. 直接构造标准 TIFF/EXIF APP1 段（含 IFD0、ExifIFD、ExifImageWidth/Height 及完整 Apple iOS MakerNote）写入 JPG；
+/// 3. 直接在 MOV 的 moov 原子中更新 mvhd/tkhd/mdhd 时间戳、注入 com.apple.quicktime.still-image-time (mebx) 定时元数据轨
+///    以及 Apple QuickTime mdta (Keys:ContentIdentifier / Make / Model / CreationDate / LivePhotoAuto / VitalityScore)。
 class MediaMetadata {
   static const int _qtEpochOffset = 2082844800; // 1904-01-01 至 1970-01-01 秒数
 
@@ -37,7 +53,6 @@ class MediaMetadata {
         final raf = await f.open();
         try {
           final fileLen = await raf.length();
-          // 定位顶层 moov 原子（无论在文件开头还是末尾）
           int pos = 0;
           while (pos + 8 <= fileLen) {
             await raf.setPosition(pos);
@@ -68,7 +83,6 @@ class MediaMetadata {
             pos += sz;
           }
 
-          // 若 moov 中无显式型号，扫描文件前部 256KB 查找相机型号标识
           if (model == null || model.isEmpty) {
             await raf.setPosition(0);
             final headLen = fileLen < 256 * 1024 ? fileLen : 256 * 1024;
@@ -138,7 +152,6 @@ class MediaMetadata {
         } else if (typ == 'udta') {
           walk(bodyStart, bodyEnd);
         } else if (typ == 'meta') {
-          // QuickTime meta 可能无 version/flags，也可能带 4 字节 version/flags
           int sub = bodyStart;
           if (sub + 8 <= bodyEnd) {
             final nextType = latin1.decode(moov.sublist(sub + 4, sub + 8));
@@ -241,19 +254,50 @@ class MediaMetadata {
     return null;
   }
 
-  /// 构造标准 TIFF/EXIF APP1 段（0xFFE1 + "Exif\0\0"），支持写入设备信息、拍摄时间及 Apple Live Photo ContentIdentifier
+  /// 从 JPEG 字节流解析 SOF0/SOF2 帧头中的真实图像宽高
+  static (int width, int height)? extractJpegDimensions(Uint8List jpg) {
+    if (jpg.length < 4 || jpg[0] != 0xFF || jpg[1] != 0xD8) return null;
+    int pos = 2;
+    while (pos + 9 <= jpg.length) {
+      if (jpg[pos] != 0xFF) {
+        pos++;
+        continue;
+      }
+      while (pos < jpg.length && jpg[pos] == 0xFF) {
+        pos++;
+      }
+      if (pos >= jpg.length) break;
+      final marker = jpg[pos];
+      pos++;
+      if (marker == 0xD8 || marker == 0xD9 || (marker >= 0xD0 && marker <= 0xD7)) {
+        continue;
+      }
+      if (marker == 0xDA || pos + 2 > jpg.length) break;
+      final segLen = (jpg[pos] << 8) | jpg[pos + 1];
+      if (segLen < 2 || pos + segLen > jpg.length) break;
+      // SOF0 / SOF1 / SOF2
+      if ((marker == 0xC0 || marker == 0xC1 || marker == 0xC2) && segLen >= 7) {
+        final h = (jpg[pos + 3] << 8) | jpg[pos + 4];
+        final w = (jpg[pos + 5] << 8) | jpg[pos + 6];
+        if (w > 0 && h > 0) return (w, h);
+      }
+      pos += segLen;
+    }
+    return null;
+  }
+
+  /// 构造标准 TIFF/EXIF APP1 段（0xFFE1 + "Exif\0\0"），支持写入设备信息、拍摄时间、LONG 型宽高及完整 Apple Live Photo MakerNote
   static Uint8List buildExifApp1Segment({
     required String make,
     required String model,
     String software = 'Pocket Motion',
     DateTime? shotAt,
     String? livePhotoUuid,
+    int? imageWidth,
+    int? imageHeight,
   }) {
     final shotStr = _formatExifDate(shotAt);
 
-    // IFD0 条目（按 Tag 升序排列）
-    // 0x010F Make, 0x0110 Model, 0x0112 Orientation, 0x011A XRes, 0x011B YRes,
-    // 0x0128 ResUnit, 0x0131 Software, [0x0132 DateTime], 0x0213 YCbCrPositioning, 0x8769 ExifOffset
     final hasDate = shotStr != null;
     final numIfd0 = hasDate ? 10 : 9;
     const ifd0Offset = 8;
@@ -325,14 +369,11 @@ class MediaMetadata {
     addEntry(ifd0Entries, blobs0, data0Offset, 0x8769, 4, 1, u32(exifIfdOffset));
 
     // ExifIFD 条目（按 Tag 升序排列）
-    // 0x9000 ExifVersion
-    // [0x9003 DateTimeOriginal, 0x9004 DateTimeDigitized, 0x9010 OffsetTime, 0x9011 OffsetTimeOriginal, 0x9012 OffsetTimeDigitized]
-    // 0x9101 ComponentsConfiguration
-    // [0x927C MakerNote (Apple Live Photo ContentIdentifier)]
-    // 0xA001 ColorSpace
+    final hasDims = imageWidth != null && imageHeight != null && imageWidth > 0 && imageHeight > 0;
     int numExif = 3; // 0x9000, 0x9101, 0xA001
     if (hasDate) numExif += 5;
     if (livePhotoUuid != null) numExif += 1;
+    if (hasDims) numExif += 2; // 0xA002 ExifImageWidth, 0xA003 ExifImageHeight (LONG=4)
 
     final data1Offset = exifIfdOffset + 2 + numExif * 12 + 4;
     final exifEntries = BytesBuilder();
@@ -376,6 +417,10 @@ class MediaMetadata {
       );
     }
     addEntry(exifEntries, blobs1, data1Offset, 0xA001, 3, 1, u16(1));
+    if (hasDims) {
+      addEntry(exifEntries, blobs1, data1Offset, 0xA002, 4, 1, u32(imageWidth));
+      addEntry(exifEntries, blobs1, data1Offset, 0xA003, 4, 1, u32(imageHeight));
+    }
 
     final tiff = BytesBuilder()
       ..add([0x4D, 0x4D, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08]) // "MM\0*\0\0\0\x08"
@@ -415,7 +460,6 @@ class MediaMetadata {
       return out.toBytes();
     }
 
-    // 跳过旧的 Exif APP1 段（避免重复 APP1 Exif 冲突）
     final out = BytesBuilder()..add([0xFF, 0xD8]);
     for (final seg in app1Segments) {
       out.add(seg);
@@ -453,8 +497,12 @@ class MediaMetadata {
     return out.toBytes();
   }
 
-  /// 纯 Dart 为 MOV/MP4 写入 Apple Live Photo QuickTime 元数据（Keys:ContentIdentifier / Make / Model / CreationDate）
-  /// 并同步更新 mvhd / tkhd / mdhd 拍摄时间戳，不改变 mdat 偏移（零重编码、零外部进程依赖）。
+  /// 纯 Dart 为 MOV 写入完整 Apple Live Photo 元数据：
+  /// 1. 确保顶层 ftyp 为标准 Apple QuickTime ('qt  ')；
+  /// 2. 追加 25 字节 still-image-time 样本并在 moov 中注入 com.apple.quicktime.still-image-time (mebx) 定时元数据轨（含 tref/cdsc 关联视频轨），
+  ///    使 iPhone 相册支持滑动自动播放（Vitality）、编辑模式任意切换封面帧，以及 Mimo 二次编辑封面不跳帧；
+  /// 3. 写入顶层 moov/meta (ContentIdentifier / Make / Model / CreationDate / LivePhotoAuto / VitalityScore)；
+  /// 4. 同步更新 mvhd / tkhd / mdhd 拍摄时间戳。
   static Future<void> writeMovLivePhotoMetadata({
     required String srcMp4Path,
     required String outMovPath,
@@ -462,11 +510,14 @@ class MediaMetadata {
     required String make,
     required String model,
     DateTime? shotAt,
+    double coverTimeSeconds = 1.5,
   }) async {
     final raw = await File(srcMp4Path).readAsBytes();
     final buf = Uint8List.fromList(raw);
 
     int pos = 0;
+    int ftypPos = -1;
+    int ftypSize = 0;
     int moovPos = -1;
     int moovSize = 0;
     int moovHdrLen = 8;
@@ -484,7 +535,10 @@ class MediaMetadata {
       }
       if (sz < hdrLen || pos + sz > buf.length) break;
 
-      if (typ == 'moov') {
+      if (typ == 'ftyp') {
+        ftypPos = pos;
+        ftypSize = sz;
+      } else if (typ == 'moov') {
         moovPos = pos;
         moovSize = sz;
         moovHdrLen = hdrLen;
@@ -498,18 +552,69 @@ class MediaMetadata {
       return;
     }
 
+    // 若顶层 ftyp 不是 'qt  '，原地将 major_brand 修正为 'qt  '
+    if (ftypPos >= 0 && ftypSize >= 16) {
+      buf[ftypPos + 8] = 0x71; // 'q'
+      buf[ftypPos + 9] = 0x74; // 't'
+      buf[ftypPos + 10] = 0x20; // ' '
+      buf[ftypPos + 11] = 0x20; // ' '
+    }
+
     final moovBody = Uint8List.fromList(
       buf.sublist(moovPos + moovHdrLen, moovPos + moovSize),
     );
 
+    final qtSec = shotAt != null
+        ? (shotAt.toUtc().millisecondsSinceEpoch ~/ 1000) + _qtEpochOffset
+        : 0;
+
     // 1. 更新 moov 内 mvhd / tkhd / mdhd 的创建时间与修改时间
-    if (shotAt != null) {
-      final unixSec = shotAt.toUtc().millisecondsSinceEpoch ~/ 1000;
-      final qtSec = unixSec + _qtEpochOffset;
+    if (qtSec > 0) {
       _patchMoovTimestamps(moovBody, 0, moovBody.length, qtSec);
     }
 
-    // 2. 过滤掉 moov 顶层旧的 meta 原子，避免与新注入的 QuickTime mdta meta 冲突
+    // 2. 解析 mvhd 时间基/总时长与最大 trackId，以及视频轨时间基与单帧时长
+    final (movieTimescale, movieDuration, maxTrackId) = _readMvhdInfo(moovBody);
+    final videoTiming = _findVideoTrackTiming(
+      moovBody,
+      fallbackTimescale: movieTimescale,
+      fallbackDuration: movieDuration,
+    );
+    final metaTrackId = maxTrackId + 1;
+    _updateMvhdNextTrackId(moovBody, metaTrackId + 1);
+
+    // 3. 构造 still-image-time 的 3 个连续样本（共 25 字节）：
+    //    Sample 1: [0 .. coverTicks] 空样本 (8B: 00000008 00000000)
+    //    Sample 2: [coverTicks .. coverTicks + frameDelta] still-image-time = -1 (9B: 00000009 00000001 FF)
+    //    Sample 3: [coverTicks + frameDelta .. videoDuration] 空样本 (8B: 00000008 00000000)
+    final metaSamplesPayload = Uint8List.fromList([
+      0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x01, 0xFF,
+      0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00,
+    ]);
+    final metaMdatAtom = _wrapAtom('mdat', metaSamplesPayload);
+
+    // 计算追加在最后的 metaMdatAtom 内部样本起始偏移（不移动原有 mdat，原视频/音频 stco 零偏移改动）
+    final isMoovAtEnd = (moovPos + moovSize == buf.length);
+    final int metaChunkFileOffset = isMoovAtEnd
+        ? (moovPos + 8)
+        : (buf.length + 8);
+
+    // 4. 构造 Apple 定时元数据轨 (com.apple.quicktime.still-image-time)
+    final stillImageMetaTrak = _buildStillImageTimeTrak(
+      metaTrackId: metaTrackId,
+      videoTrackId: videoTiming.trackId,
+      qtSec: qtSec,
+      movieTimescale: movieTimescale,
+      movieDuration: movieDuration,
+      videoTimescale: videoTiming.videoTimescale,
+      videoDuration: videoTiming.videoDuration,
+      frameDelta: videoTiming.frameDelta,
+      coverTimeSeconds: coverTimeSeconds,
+      metaChunkFileOffset: metaChunkFileOffset,
+    );
+
+    // 5. 过滤 moov：仅保留 mvhd 与音视频 trak（剔除旧 meta、udta 及私有非音视频轨道如 dbgi）
     final filteredMoovBody = BytesBuilder();
     int bPos = 0;
     while (bPos + 8 <= moovBody.length) {
@@ -518,43 +623,454 @@ class MediaMetadata {
       final typ = latin1.decode(moovBody.sublist(bPos + 4, bPos + 8));
       if (sz == 0) sz = moovBody.length - bPos;
       if (sz < 8 || bPos + sz > moovBody.length) break;
-      if (typ != 'meta') {
+
+      if (typ == 'mvhd') {
         filteredMoovBody.add(moovBody.sublist(bPos, bPos + sz));
+      } else if (typ == 'trak') {
+        final handlerSub = _getTrakHandlerSubtype(moovBody, bPos + 8, bPos + sz);
+        if (handlerSub == 'vide' || handlerSub == 'soun') {
+          filteredMoovBody.add(moovBody.sublist(bPos, bPos + sz));
+        }
       }
       bPos += sz;
     }
 
-    // 3. 构造标准 Apple QuickTime mdta meta 原子
-    final kvPairs = <(String, String)>[
-      ('com.apple.quicktime.content.identifier', uuid),
-      ('com.apple.quicktime.make', make),
-      ('com.apple.quicktime.model', model),
-      if (shotAt != null)
-        ('com.apple.quicktime.creationdate', _formatIso8601WithOffset(shotAt)),
-    ];
-    final metaAtom = _buildQtMdtaMetaAtom(kvPairs);
+    // 加入新建的 still-image-time 定时元数据轨
+    filteredMoovBody.add(stillImageMetaTrak);
+
+    // 6. 构造标准 Apple QuickTime mdta meta 原子（含实况自动播放与活力评分标签）
+    final metaAtom = _buildQtMdtaLivePhotoMetaAtom(
+      uuid: uuid,
+      make: make,
+      model: model,
+      creationDateIso: shotAt != null ? _formatIso8601WithOffset(shotAt) : null,
+    );
     filteredMoovBody.add(metaAtom);
 
-    final newMoovPayload = filteredMoovBody.toBytes();
-    final newMoovAtom = _wrapAtom('moov', newMoovPayload);
+    final newMoovAtom = _wrapAtom('moov', filteredMoovBody.toBytes());
 
     final out = BytesBuilder();
-    final isMoovAtEnd = (moovPos + moovSize == buf.length);
     if (isMoovAtEnd) {
-      // moov 本就在文件末尾：直接替换末尾 moov
       out.add(buf.sublist(0, moovPos));
+      out.add(metaMdatAtom);
       out.add(newMoovAtom);
     } else {
-      // moov 在 mdat 之前：将原位置 moov 改为等长 free 原子以保持 mdat 偏移不变，并在文件末尾追加新 moov
       buf[moovPos + 4] = 0x66; // 'f'
       buf[moovPos + 5] = 0x72; // 'r'
       buf[moovPos + 6] = 0x65; // 'e'
       buf[moovPos + 7] = 0x65; // 'e'
       out.add(buf);
+      out.add(metaMdatAtom);
       out.add(newMoovAtom);
     }
 
     await File(outMovPath).writeAsBytes(out.toBytes());
+  }
+
+  static (int timescale, int duration, int maxTrackId) _readMvhdInfo(Uint8List moovBody) {
+    int timescale = 600;
+    int duration = 1800;
+    int maxTrackId = 2;
+
+    int pos = 0;
+    while (pos + 8 <= moovBody.length) {
+      final bd = ByteData.sublistView(moovBody, pos, pos + 8);
+      int sz = bd.getUint32(0);
+      final typ = latin1.decode(moovBody.sublist(pos + 4, pos + 8));
+      if (sz == 0) sz = moovBody.length - pos;
+      if (sz < 8 || pos + sz > moovBody.length) break;
+
+      final bodyStart = pos + 8;
+      final bodyEnd = pos + sz;
+      if (typ == 'mvhd' && bodyEnd - bodyStart >= 24) {
+        final ver = moovBody[bodyStart];
+        final mBd = ByteData.sublistView(moovBody, bodyStart, bodyEnd);
+        if (ver == 1 && bodyEnd - bodyStart >= 32) {
+          timescale = mBd.getUint32(20);
+          duration = mBd.getUint64(24);
+          if (bodyEnd - bodyStart >= 108) {
+            final nextId = mBd.getUint32(104);
+            if (nextId > maxTrackId) maxTrackId = nextId - 1;
+          }
+        } else {
+          timescale = mBd.getUint32(12);
+          duration = mBd.getUint32(16);
+          if (bodyEnd - bodyStart >= 100) {
+            final nextId = mBd.getUint32(96);
+            if (nextId > maxTrackId) maxTrackId = nextId - 1;
+          }
+        }
+      } else if (typ == 'trak') {
+        final tid = _getTrakId(moovBody, bodyStart, bodyEnd);
+        if (tid != null && tid > maxTrackId) maxTrackId = tid;
+      }
+      pos += sz;
+    }
+    if (timescale <= 0) timescale = 600;
+    if (duration <= 0) duration = timescale * 3;
+    return (timescale, duration, maxTrackId);
+  }
+
+  static void _updateMvhdNextTrackId(Uint8List moovBody, int nextTrackId) {
+    int pos = 0;
+    while (pos + 8 <= moovBody.length) {
+      final bd = ByteData.sublistView(moovBody, pos, pos + 8);
+      int sz = bd.getUint32(0);
+      final typ = latin1.decode(moovBody.sublist(pos + 4, pos + 8));
+      if (sz == 0) sz = moovBody.length - pos;
+      if (sz < 8 || pos + sz > moovBody.length) break;
+      final bodyStart = pos + 8;
+      final bodyEnd = pos + sz;
+      if (typ == 'mvhd') {
+        final ver = moovBody[bodyStart];
+        final mBd = ByteData.sublistView(moovBody, bodyStart, bodyEnd);
+        if (ver == 1 && bodyEnd - bodyStart >= 108) {
+          mBd.setUint32(104, nextTrackId, Endian.big);
+        } else if (ver == 0 && bodyEnd - bodyStart >= 100) {
+          mBd.setUint32(96, nextTrackId, Endian.big);
+        }
+        break;
+      }
+      pos += sz;
+    }
+  }
+
+  static int? _getTrakId(Uint8List buf, int start, int end) {
+    int pos = start;
+    while (pos + 8 <= end) {
+      final sz = ByteData.sublistView(buf, pos, pos + 4).getUint32(0);
+      final typ = latin1.decode(buf.sublist(pos + 4, pos + 8));
+      if (sz < 8 || pos + sz > end) break;
+      if (typ == 'tkhd' && sz >= 24) {
+        final ver = buf[pos + 8];
+        final bd = ByteData.sublistView(buf, pos + 8, pos + sz);
+        return ver == 1 && sz >= 32 ? bd.getUint32(20) : bd.getUint32(12);
+      }
+      pos += sz;
+    }
+    return null;
+  }
+
+  static String? _getTrakHandlerSubtype(Uint8List buf, int start, int end) {
+    int pos = start;
+    while (pos + 8 <= end) {
+      int sz = ByteData.sublistView(buf, pos, pos + 4).getUint32(0);
+      final typ = latin1.decode(buf.sublist(pos + 4, pos + 8));
+      if (sz == 0) sz = end - pos;
+      if (sz < 8 || pos + sz > end) break;
+      if (typ == 'mdia') {
+        int mPos = pos + 8;
+        final mEnd = pos + sz;
+        while (mPos + 8 <= mEnd) {
+          int mSz = ByteData.sublistView(buf, mPos, mPos + 4).getUint32(0);
+          final mTyp = latin1.decode(buf.sublist(mPos + 4, mPos + 8));
+          if (mSz == 0) mSz = mEnd - mPos;
+          if (mSz < 8 || mPos + mSz > mEnd) break;
+          if (mTyp == 'hdlr' && mSz >= 20) {
+            return latin1.decode(buf.sublist(mPos + 16, mPos + 20));
+          }
+          mPos += mSz;
+        }
+      }
+      pos += sz;
+    }
+    return null;
+  }
+
+  static _VideoTrackTiming _findVideoTrackTiming(
+    Uint8List moovBody, {
+    required int fallbackTimescale,
+    required int fallbackDuration,
+  }) {
+    int pos = 0;
+    while (pos + 8 <= moovBody.length) {
+      int sz = ByteData.sublistView(moovBody, pos, pos + 4).getUint32(0);
+      final typ = latin1.decode(moovBody.sublist(pos + 4, pos + 8));
+      if (sz == 0) sz = moovBody.length - pos;
+      if (sz < 8 || pos + sz > moovBody.length) break;
+
+      if (typ == 'trak') {
+        final sub = _getTrakHandlerSubtype(moovBody, pos + 8, pos + sz);
+        if (sub == 'vide') {
+          final trackId = _getTrakId(moovBody, pos + 8, pos + sz) ?? 1;
+          int vTimescale = fallbackTimescale;
+          int vDuration = fallbackDuration;
+          int frameDelta = (fallbackTimescale / 30).round();
+
+          void scanMdia(int s, int e) {
+            int p = s;
+            while (p + 8 <= e) {
+              int aSz = ByteData.sublistView(moovBody, p, p + 4).getUint32(0);
+              final aTyp = latin1.decode(moovBody.sublist(p + 4, p + 8));
+              if (aSz == 0) aSz = e - p;
+              if (aSz < 8 || p + aSz > e) break;
+              final bStart = p + 8;
+              final bEnd = p + aSz;
+              if (aTyp == 'mdhd' && bEnd - bStart >= 20) {
+                final ver = moovBody[bStart];
+                final bd = ByteData.sublistView(moovBody, bStart, bEnd);
+                if (ver == 1 && bEnd - bStart >= 32) {
+                  vTimescale = bd.getUint32(20);
+                  vDuration = bd.getUint64(24);
+                } else {
+                  vTimescale = bd.getUint32(12);
+                  vDuration = bd.getUint32(16);
+                }
+              } else if (aTyp == 'stts' && bEnd - bStart >= 16) {
+                final bd = ByteData.sublistView(moovBody, bStart, bEnd);
+                final entryCount = bd.getUint32(4);
+                if (entryCount >= 1) {
+                  final delta = bd.getUint32(12);
+                  if (delta > 0) frameDelta = delta;
+                }
+              } else if (aTyp == 'mdia' || aTyp == 'minf' || aTyp == 'stbl') {
+                scanMdia(bStart, bEnd);
+              }
+              p += aSz;
+            }
+          }
+
+          scanMdia(pos + 8, pos + sz);
+          if (vTimescale <= 0) vTimescale = 600;
+          if (frameDelta <= 0) frameDelta = (vTimescale / 30).round().clamp(1, vTimescale);
+          if (vDuration <= frameDelta * 2) vDuration = vTimescale * 3;
+          return _VideoTrackTiming(
+            trackId: trackId,
+            videoTimescale: vTimescale,
+            videoDuration: vDuration,
+            frameDelta: frameDelta,
+          );
+        }
+      }
+      pos += sz;
+    }
+
+    final defaultDelta = (fallbackTimescale / 30).round().clamp(1, fallbackTimescale);
+    return _VideoTrackTiming(
+      trackId: 1,
+      videoTimescale: fallbackTimescale,
+      videoDuration: fallbackDuration,
+      frameDelta: defaultDelta,
+    );
+  }
+
+  /// 构造 Apple Live Photo 必需的 com.apple.quicktime.still-image-time (mebx) 定时元数据轨
+  static Uint8List _buildStillImageTimeTrak({
+    required int metaTrackId,
+    required int videoTrackId,
+    required int qtSec,
+    required int movieTimescale,
+    required int movieDuration,
+    required int videoTimescale,
+    required int videoDuration,
+    required int frameDelta,
+    required double coverTimeSeconds,
+    required int metaChunkFileOffset,
+  }) {
+    final totalFrames = (videoDuration / frameDelta).floor();
+    final targetFrame = ((coverTimeSeconds * videoTimescale) / frameDelta).round();
+    final clampedFrame = totalFrames > 2
+        ? targetFrame.clamp(1, totalFrames - 2)
+        : 1;
+    final int coverTicks = (clampedFrame * frameDelta).clamp(
+      frameDelta,
+      videoDuration > frameDelta * 2 ? videoDuration - frameDelta * 2 : frameDelta,
+    );
+    final int oneFrameTicks = frameDelta;
+    final int tailTicks = (videoDuration - coverTicks - oneFrameTicks).clamp(
+      frameDelta,
+      videoDuration,
+    );
+    final int totalMetaVideoTicks = coverTicks + oneFrameTicks + tailTicks;
+
+    // 1. tkhd (92 bytes, version 0, flags = 0x0000000F)
+    final tkhdPayload = ByteData(84)
+      ..setUint32(0, 0x0000000F, Endian.big)
+      ..setUint32(4, qtSec & 0xFFFFFFFF, Endian.big)
+      ..setUint32(8, qtSec & 0xFFFFFFFF, Endian.big)
+      ..setUint32(12, metaTrackId, Endian.big)
+      ..setUint32(16, 0, Endian.big)
+      ..setUint32(20, movieDuration, Endian.big)
+      ..setUint32(44, 0x00010000, Endian.big)
+      ..setUint32(60, 0x00010000, Endian.big)
+      ..setUint32(72, 0x40000000, Endian.big);
+    final tkhdAtom = _wrapAtom('tkhd', tkhdPayload.buffer.asUint8List());
+
+    // 2. tref -> cdsc (关联到视频轨 ID，声明此元数据轨描述主视频轨)
+    final cdscPayload = ByteData(4)..setUint32(0, videoTrackId, Endian.big);
+    final cdscAtom = _wrapAtom('cdsc', cdscPayload.buffer.asUint8List());
+    final trefAtom = _wrapAtom('tref', cdscAtom);
+
+    // 3. edts -> elst (1 条目，从 0 开始覆盖整条轨道)
+    final elstPayload = ByteData(20)
+      ..setUint32(0, 0, Endian.big)
+      ..setUint32(4, 1, Endian.big)
+      ..setUint32(8, movieDuration, Endian.big)
+      ..setUint32(12, 0, Endian.big)
+      ..setUint32(16, 0x00010000, Endian.big);
+    final elstAtom = _wrapAtom('elst', elstPayload.buffer.asUint8List());
+    final edtsAtom = _wrapAtom('edts', elstAtom);
+
+    // 4. mdia -> mdhd (32 bytes)
+    final mdhdPayload = ByteData(24)
+      ..setUint32(0, 0, Endian.big)
+      ..setUint32(4, qtSec & 0xFFFFFFFF, Endian.big)
+      ..setUint32(8, qtSec & 0xFFFFFFFF, Endian.big)
+      ..setUint32(12, videoTimescale, Endian.big)
+      ..setUint32(16, totalMetaVideoTicks, Endian.big)
+      ..setUint16(20, 0x55C4, Endian.big)
+      ..setUint16(22, 0, Endian.big);
+    final mdhdAtom = _wrapAtom('mdhd', mdhdPayload.buffer.asUint8List());
+
+    // 5. mdia -> hdlr (mhlr / meta / appl, 'Core Media Metadata')
+    final mdiaHdlrAtom = _wrapAtom(
+      'hdlr',
+      Uint8List.fromList([
+        0x00, 0x00, 0x00, 0x00,
+        0x6D, 0x68, 0x6C, 0x72, // 'mhlr'
+        0x6D, 0x65, 0x74, 0x61, // 'meta'
+        0x61, 0x70, 0x70, 0x6C, // 'appl'
+        0x00, 0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x00,
+        0x13,
+        ...'Core Media Metadata'.codeUnits,
+      ]),
+    );
+
+    // 6. minf -> gmhd -> gmin
+    final gmhdAtom = _wrapAtom(
+      'gmhd',
+      Uint8List.fromList([
+        0x00, 0x00, 0x00, 0x18,
+        0x67, 0x6D, 0x69, 0x6E, // 'gmin'
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x40, 0x80, 0x00,
+        0x80, 0x00, 0x80, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+      ]),
+    );
+
+    // 7. minf -> hdlr (dhlr / alis / appl, 'Core Media Data Handler')
+    final minfHdlrAtom = _wrapAtom(
+      'hdlr',
+      Uint8List.fromList([
+        0x00, 0x00, 0x00, 0x00,
+        0x64, 0x68, 0x6C, 0x72, // 'dhlr'
+        0x61, 0x6C, 0x69, 0x73, // 'alis'
+        0x61, 0x70, 0x70, 0x6C, // 'appl'
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x17,
+        ...'Core Media Data Handler'.codeUnits,
+      ]),
+    );
+
+    // 8. minf -> dinf -> dref -> alis
+    final dinfAtom = _wrapAtom(
+      'dinf',
+      Uint8List.fromList([
+        0x00, 0x00, 0x00, 0x1C,
+        0x64, 0x72, 0x65, 0x66, // 'dref'
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x0C,
+        0x61, 0x6C, 0x69, 0x73, // 'alis'
+        0x00, 0x00, 0x00, 0x01,
+      ]),
+    );
+
+    // 9. stbl -> stsd (mebx: mdta/com.apple.quicktime.still-image-time, dtyp = SInt8 [0x41])
+    final stsdAtom = Uint8List.fromList([
+      0x00, 0x00, 0x00, 0x70, 0x73, 0x74, 0x73, 0x64,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+      0x00, 0x00, 0x00, 0x60, 0x6D, 0x65, 0x62, 0x78,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+      0x00, 0x00, 0x00, 0x50, 0x6B, 0x65, 0x79, 0x73,
+      0x00, 0x00, 0x00, 0x48, 0x00, 0x00, 0x00, 0x01,
+      0x00, 0x00, 0x00, 0x30, 0x6B, 0x65, 0x79, 0x64,
+      0x6D, 0x64, 0x74, 0x61,
+      ...'com.apple.quicktime.still-image-time'.codeUnits,
+      0x00, 0x00, 0x00, 0x10, 0x64, 0x74, 0x79, 0x70,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x41,
+    ]);
+
+    // 10. stbl -> stts
+    final sttsPayload = ByteData(32)
+      ..setUint32(0, 0, Endian.big)
+      ..setUint32(4, 3, Endian.big)
+      ..setUint32(8, 1, Endian.big)
+      ..setUint32(12, coverTicks, Endian.big)
+      ..setUint32(16, 1, Endian.big)
+      ..setUint32(20, oneFrameTicks, Endian.big)
+      ..setUint32(24, 1, Endian.big)
+      ..setUint32(28, tailTicks, Endian.big);
+    final sttsAtom = _wrapAtom('stts', sttsPayload.buffer.asUint8List());
+
+    // 11. stbl -> stsc
+    final stscPayload = ByteData(20)
+      ..setUint32(0, 0, Endian.big)
+      ..setUint32(4, 1, Endian.big)
+      ..setUint32(8, 1, Endian.big)
+      ..setUint32(12, 3, Endian.big)
+      ..setUint32(16, 1, Endian.big);
+    final stscAtom = _wrapAtom('stsc', stscPayload.buffer.asUint8List());
+
+    // 12. stbl -> stsz
+    final stszPayload = ByteData(24)
+      ..setUint32(0, 0, Endian.big)
+      ..setUint32(4, 0, Endian.big)
+      ..setUint32(8, 3, Endian.big)
+      ..setUint32(12, 8, Endian.big)
+      ..setUint32(16, 9, Endian.big)
+      ..setUint32(20, 8, Endian.big);
+    final stszAtom = _wrapAtom('stsz', stszPayload.buffer.asUint8List());
+
+    // 13. stbl -> stco
+    final stcoPayload = ByteData(12)
+      ..setUint32(0, 0, Endian.big)
+      ..setUint32(4, 1, Endian.big)
+      ..setUint32(8, metaChunkFileOffset, Endian.big);
+    final stcoAtom = _wrapAtom('stco', stcoPayload.buffer.asUint8List());
+
+    final stblAtom = _wrapAtom(
+      'stbl',
+      (BytesBuilder()
+            ..add(stsdAtom)
+            ..add(sttsAtom)
+            ..add(stscAtom)
+            ..add(stszAtom)
+            ..add(stcoAtom))
+          .toBytes(),
+    );
+
+    final minfAtom = _wrapAtom(
+      'minf',
+      (BytesBuilder()
+            ..add(gmhdAtom)
+            ..add(minfHdlrAtom)
+            ..add(dinfAtom)
+            ..add(stblAtom))
+          .toBytes(),
+    );
+
+    final mdiaAtom = _wrapAtom(
+      'mdia',
+      (BytesBuilder()
+            ..add(mdhdAtom)
+            ..add(mdiaHdlrAtom)
+            ..add(minfAtom))
+          .toBytes(),
+    );
+
+    return _wrapAtom(
+      'trak',
+      (BytesBuilder()
+            ..add(tkhdAtom)
+            ..add(trefAtom)
+            ..add(edtsAtom)
+            ..add(mdiaAtom))
+          .toBytes(),
+    );
   }
 
   static void _patchMoovTimestamps(Uint8List buf, int start, int end, int qtSec) {
@@ -588,8 +1104,13 @@ class MediaMetadata {
     }
   }
 
-  static Uint8List _buildQtMdtaMetaAtom(List<(String, String)> kvPairs) {
-    // hdlr: 32 bytes ('hdlr', version/flags=0, component_type=0, subtype='mdta', reserved=12B)
+  /// 构造包含 ContentIdentifier、Make、Model、CreationDate 以及 LivePhotoAuto / VitalityScore 的 QuickTime mdta meta 原子
+  static Uint8List _buildQtMdtaLivePhotoMetaAtom({
+    required String uuid,
+    required String make,
+    required String model,
+    String? creationDateIso,
+  }) {
     final hdlrPayload = Uint8List(24);
     hdlrPayload[8] = 0x6D; // 'm'
     hdlrPayload[9] = 0x64; // 'd'
@@ -597,31 +1118,71 @@ class MediaMetadata {
     hdlrPayload[11] = 0x61; // 'a'
     final hdlrAtom = _wrapAtom('hdlr', hdlrPayload);
 
+    final items = <(String, int, Uint8List)>[
+      (
+        'com.apple.quicktime.content.identifier',
+        1,
+        Uint8List.fromList(utf8.encode(uuid)),
+      ),
+      (
+        'com.apple.quicktime.make',
+        1,
+        Uint8List.fromList(utf8.encode(make)),
+      ),
+      (
+        'com.apple.quicktime.model',
+        1,
+        Uint8List.fromList(utf8.encode(model)),
+      ),
+      if (creationDateIso != null)
+        (
+          'com.apple.quicktime.creationdate',
+          1,
+          Uint8List.fromList(utf8.encode(creationDateIso)),
+        ),
+      (
+        'com.apple.quicktime.live-photo.auto',
+        21,
+        Uint8List.fromList([0x01]),
+      ),
+      (
+        'com.apple.quicktime.live-photo.vitality-score',
+        23,
+        Uint8List.fromList([0x3F, 0x80, 0x00, 0x00]),
+      ),
+      (
+        'com.apple.quicktime.live-photo.vitality-scoring-version',
+        21,
+        Uint8List.fromList([0x00, 0x00, 0x00, 0x04]),
+      ),
+    ];
+
     final keysPayload = BytesBuilder();
     final keysHdr = ByteData(8)
       ..setUint32(0, 0, Endian.big)
-      ..setUint32(4, kvPairs.length, Endian.big);
+      ..setUint32(4, items.length, Endian.big);
     keysPayload.add(keysHdr.buffer.asUint8List());
 
     final ilstPayload = BytesBuilder();
 
-    for (var i = 0; i < kvPairs.length; i++) {
+    for (var i = 0; i < items.length; i++) {
       final idx = i + 1;
-      final keyBytes = utf8.encode(kvPairs[i].$1);
-      final valBytes = utf8.encode(kvPairs[i].$2);
+      final keyBytes = utf8.encode(items[i].$1);
+      final dataType = items[i].$2;
+      final valBytes = items[i].$3;
 
       final keyHeader = ByteData(8)
         ..setUint32(0, keyBytes.length + 8, Endian.big)
-        ..setUint8(4, 0x6D) // 'm'
-        ..setUint8(5, 0x64) // 'd'
-        ..setUint8(6, 0x74) // 't'
-        ..setUint8(7, 0x61); // 'a'
+        ..setUint8(4, 0x6D)
+        ..setUint8(5, 0x64)
+        ..setUint8(6, 0x74)
+        ..setUint8(7, 0x61);
       keysPayload.add(keyHeader.buffer.asUint8List());
       keysPayload.add(keyBytes);
 
       final dataPrefix = ByteData(8)
-        ..setUint32(0, 1, Endian.big) // type = 1 (UTF-8 text)
-        ..setUint32(4, 0, Endian.big); // locale = 0
+        ..setUint32(0, dataType, Endian.big)
+        ..setUint32(4, 0, Endian.big);
       final dataPayload = BytesBuilder()
         ..add(dataPrefix.buffer.asUint8List())
         ..add(valBytes);
@@ -657,25 +1218,76 @@ class MediaMetadata {
         .toBytes();
   }
 
-  /// 构造包含 Tag 0x0011 (ContentIdentifier) 的最小 Apple iOS MakerNote 二进制块（70 字节）
+  /// 构造包含完整实况标签的 Apple iOS MakerNote 二进制块：
+  /// - 0x0001 MakerNoteVersion = 14
+  /// - 0x0003 RunTime = bplist00 {epoch: 0, flags: 1, timescale: 600, value: 900} (1.5s)
+  /// - 0x0008 AccelerationVector = [0/1, -1/1, 0/1]
+  /// - 0x0011 ContentIdentifier = uuid
+  /// - 0x0014 ImageCaptureType = 10 (Photo)
+  /// - 0x0017 LivePhotoVideoIndex = 900
   static Uint8List _buildAppleMakerNote(String uuid) {
-    final b = BytesBuilder();
-    // "Apple iOS\0\0\x01MM"
-    b.add([
-      0x41, 0x70, 0x70, 0x6C, 0x65, 0x20, 0x69, 0x4F, 0x53, 0x00,
-      0x00, 0x01, 0x4D, 0x4D,
-    ]);
-    // Entry count = 1, Tag = 0x0011, Type = 2 (ASCII), Count = 37, Offset = 32, NextIFD = 0
-    b.add([
-      0x00, 0x01,
-      0x00, 0x11,
-      0x00, 0x02,
-      0x00, 0x00, 0x00, 0x25,
-      0x00, 0x00, 0x00, 0x20,
-      0x00, 0x00, 0x00, 0x00,
-    ]);
-    b.add(uuid.codeUnits);
-    b.add([0x00, 0x00]);
+    const runTimeBplist = <int>[
+      98, 112, 108, 105, 115, 116, 48, 48, 212, 1, 2, 3, 4, 5, 6, 7, 8, 85,
+      101, 112, 111, 99, 104, 85, 102, 108, 97, 103, 115, 89, 116, 105, 109,
+      101, 115, 99, 97, 108, 101, 85, 118, 97, 108, 117, 101, 16, 0, 16, 1,
+      17, 2, 88, 17, 3, 132, 8, 17, 23, 29, 39, 45, 47, 49, 52, 0, 0, 0, 0,
+      0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 55,
+    ];
+
+    const numEntries = 6;
+    const dataStart = 14 + 2 + numEntries * 12 + 4; // 92
+
+    final entries = BytesBuilder();
+    final blobs = BytesBuilder();
+
+    void addMnEntry(int tag, int type, int count, Uint8List rawBytes) {
+      final h = ByteData(8)
+        ..setUint16(0, tag, Endian.big)
+        ..setUint16(2, type, Endian.big)
+        ..setUint32(4, count, Endian.big);
+      entries.add(h.buffer.asUint8List());
+      if (rawBytes.length <= 4) {
+        final val = Uint8List(4)..setRange(0, rawBytes.length, rawBytes);
+        entries.add(val);
+      } else {
+        final off = dataStart + blobs.length;
+        final offBd = ByteData(4)..setUint32(0, off, Endian.big);
+        entries.add(offBd.buffer.asUint8List());
+        blobs.add(rawBytes);
+        if (blobs.length.isOdd) blobs.addByte(0);
+      }
+    }
+
+    Uint8List s32(int v) => (ByteData(4)..setInt32(0, v, Endian.big)).buffer.asUint8List();
+
+    final accelBytes = ByteData(24)
+      ..setInt32(0, 0, Endian.big)
+      ..setInt32(4, 1, Endian.big)
+      ..setInt32(8, -1, Endian.big)
+      ..setInt32(12, 1, Endian.big)
+      ..setInt32(16, 0, Endian.big)
+      ..setInt32(20, 1, Endian.big);
+
+    final uuidBytes = Uint8List.fromList([...uuid.codeUnits, 0]);
+
+    addMnEntry(0x0001, 9, 1, s32(14));
+    addMnEntry(0x0003, 7, runTimeBplist.length, Uint8List.fromList(runTimeBplist));
+    addMnEntry(0x0008, 10, 3, accelBytes.buffer.asUint8List());
+    addMnEntry(0x0011, 2, uuidBytes.length, uuidBytes);
+    addMnEntry(0x0014, 9, 1, s32(10));
+    addMnEntry(0x0017, 9, 1, s32(900));
+
+    final b = BytesBuilder()
+      ..add([
+        0x41, 0x70, 0x70, 0x6C, 0x65, 0x20, 0x69, 0x4F, 0x53, 0x00,
+        0x00, 0x01, 0x4D, 0x4D,
+      ])
+      ..add((ByteData(2)..setUint16(0, numEntries, Endian.big)).buffer.asUint8List())
+      ..add(entries.toBytes())
+      ..add([0x00, 0x00, 0x00, 0x00])
+      ..add(blobs.toBytes());
+
     return b.toBytes();
   }
 
