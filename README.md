@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🎞️ Pocket Motion
+# 🎥 Pocket Motion
 
 **专为大疆 DJI Mimo 生态下的 Osmo Pocket 系列打造的全平台实况照片（Live Photo / Motion Photo）与媒体无损导出工具**
 
