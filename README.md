@@ -2,14 +2,14 @@
 
 # 🎞️ Pocket Motion
 
-**专为大疆 DJI Osmo Pocket 3 打造的全平台实况照片（Live Photo / Motion Photo）与媒体无损导出工具**
+**专为大疆 DJI Mimo 生态下的 Osmo Pocket 系列打造的全平台实况照片（Live Photo / Motion Photo）与媒体无损导出工具**
 
 [![Version](https://img.shields.io/badge/Version-v2.1.1-0A84FF?style=flat-square)](#)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-4A90E2?style=flat-square)](#)
 [![Flutter](https://img.shields.io/badge/Built%20with-Flutter%203.24-02569B?style=flat-square&logo=flutter)](#)
 [![License](https://img.shields.io/badge/License-MIT-2ECC71?style=flat-square)](#)
 
-将 SD 卡或本地目录中的素材一键导出为 **Apple 实况照片（原生 `.HEIC + .MOV`）**、**Google 动态照片（`.jpg`）**、**原片视频（`.MP4`）** 与 **高清照片（`.JPG`）**，支持 macOS 与 Windows 双平台开箱即用，完整保留原片画质、真实拍摄设备型号、时间戳与 iPhone 相册原生交互体验。
+针对 DJI Mimo 拍摄的 Osmo Pocket 系列素材，将 SD 卡或本地目录中的文件一键导出为 **Apple 实况照片（原生 `.HEIC + .MOV`）**、**Google 动态照片（`.jpg`）**、**原片视频（`.MP4`）** 与 **高清照片（`.JPG`）**，支持 macOS 与 Windows 双平台开箱即用，完整保留原片画质、真实拍摄设备型号、时间戳与 iPhone 相册原生交互体验。
 
 </div>
 
@@ -31,7 +31,7 @@
   - **照片模式**：左侧面板自动切换为「导出照片」，将选中的原片 `.JPG` 无损复制归档至导出目录下的 **`photo/`** 文件夹，并完整保留原图时间属性。
 
 - **📷 自动抓取源文件真实设备信息**
-  - 纯 Dart 引擎直接解析源 `.MP4` 容器中的 QuickTime 元数据原子与大疆固件签名，自动提取真实拍摄设备品牌与型号（如 `DJI` / `DJI OsmoPocket3` / `DJI OsmoPocket4P`）、原始拍摄时间及时区信息。
+  - 纯 Dart 引擎直接解析源 `.MP4` 容器中的 QuickTime 元数据原子与大疆固件签名，自动提取真实拍摄设备品牌与型号——覆盖 Osmo Pocket 全系列（如 `DJI OsmoPocket3` / `DJI OsmoPocket4P`）、原始拍摄时间及时区信息。
   - 导出的 Apple `.HEIC`、`.MOV` 以及 Google `.jpg` 均写入真实相机型号与拍摄时间，绝不写死虚拟手机型号。
 
 - **⚡ 纯 Dart 元数据与容器引擎 + 独立内置 FFmpeg 动态库（彻底兼容全系统与中文路径）**
@@ -60,7 +60,7 @@
 ## 🚀 使用指南
 
 1. **连接素材源**
-   - 插入 DJI Osmo Pocket 3 的 SD 卡（或将相机通过 USB-C 连接电脑），软件会自动扫描挂载的卷并定位 `DCIM` 目录；也可点击左侧 **「素材源目录 → 选择…」** 手动指定任意本地文件夹（路径会自动保存）。
+   - 插入 DJI Osmo Pocket 系列相机的 SD 卡（如 Osmo Pocket 3 / 4，或将相机通过 USB-C 连接电脑），软件会自动扫描挂载的卷并定位 `DCIM` 目录；也可点击左侧 **「素材源目录 → 选择…」** 手动指定任意本地文件夹（路径会自动保存）。
 2. **筛选与多选素材**
    - 在顶部标签栏切换 **「实况」**（`≤ 4.0s` 短视频）、**「视频」** 或 **「照片」**。
    - 单击卡片可逐个勾选；选中第一个素材后，**按住 `Shift` 键点击末尾素材**即可快速选中整段区间；也可点击右上角 **「全选当前」**。
