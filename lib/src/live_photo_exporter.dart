@@ -9,7 +9,8 @@ import 'tool_path.dart';
 ///
 /// 流程（纯 Dart 封装 .HEIC 与 .MOV 定时元数据轨，不依赖外部 exiftool / Perl 进程）：
 /// 1. 从源 MP4 解析设备品牌/型号（如 DJI / DJI OsmoPocket4P）与拍摄时间；
-/// 2. ffmpeg 抽取原 MP4 1.5s 中间帧编码为单帧 HEVC (hvc1)，由纯 Dart 封装为标准 ISO/IEC 23008-12 原生 .HEIC 文件并写入完整 EXIF 与 Apple MakerNote；
+/// 2. ffmpeg 仅映射第一条视频轨 (-map 0:v:0 -an -sn -dn) 抽取 1.5s 中间帧编码为单帧 Main Profile HEVC (hvc1)，
+///    由纯 Dart 封装为标准 ISO/IEC 23008-12 原生 .HEIC 文件并写入完整 EXIF 与 Apple MakerNote；
 /// 3. ffmpeg 将原 MP4 无损重封装为纯净 QuickTime MOV 容器（剔除私有 dbgi 轨）；
 /// 4. 纯 Dart 向 .MOV 注入 com.apple.quicktime.still-image-time (mebx) 定时元数据轨与 QuickTime mdta 元数据；
 /// 支持 iPhone 相册滑动自动播放、相册编辑自由更换封面帧，以及大疆 Mimo 二次编辑封面不跳帧。
@@ -42,23 +43,23 @@ class LivePhotoExporter {
         ? mp4Info.model
         : '${mp4Info.make} ${mp4Info.model}';
 
-    // 1) 抽取 1.5s 中间帧编码为单帧 HEVC (hvc1)，并由纯 Dart 封装为带完整 EXIF + Apple MakerNote 的原生 .HEIC
+    // 1) 抽取 1.5s 中间帧编码为单帧 HEVC Main Profile (hvc1)，并由纯 Dart 封装为带完整 EXIF + Apple MakerNote 的原生 .HEIC
+    // 注意：必须加 -map 0:v:0 -an -sn -dn 排除音轨/字幕/数据轨，且不能在 x265-params 中设置 keyint=1（否则 x265 会切换为
+    // RExt Profile 4 导致 macOS/iOS 硬件解码器拒绝显示；单帧 -frames:v 1 默认首帧即为 Main Profile IDR 关键帧）。
     _log('生成原生 HEIC 封面: $base ($deviceLabel)');
     try {
-      await _run('ffmpeg', [
-        '-y',
-        '-ss', '1.5',
-        '-i', asset.path,
-        '-frames:v', '1',
-        '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-        '-c:v', 'libx265',
-        '-preset', 'fast',
-        '-crf', '16',
-        '-x265-params', 'log-level=error:keyint=1:bframes=0:ref=1',
-        '-pix_fmt', 'yuv420p',
-        '-tag:v', 'hvc1',
-        tmpHevcMp4,
-      ], mustSucceed: true);
+      await _encodeSingleHevcFrame(
+        inputPath: asset.path,
+        outputMp4Path: tmpHevcMp4,
+        seekSeconds: '1.5',
+      );
+      if (!File(tmpHevcMp4).existsSync() || File(tmpHevcMp4).lengthSync() < 4096) {
+        await _encodeSingleHevcFrame(
+          inputPath: asset.path,
+          outputMp4Path: tmpHevcMp4,
+          seekSeconds: '0',
+        );
+      }
 
       await MediaMetadata.buildHeicFromHevcMp4(
         hevcMp4Path: tmpHevcMp4,
@@ -122,6 +123,36 @@ class LivePhotoExporter {
 
     _log('完成: $base.HEIC + $base.MOV (UUID $uuid)');
     return (outHeic, outMov);
+  }
+
+  Future<void> _encodeSingleHevcFrame({
+    required String inputPath,
+    required String outputMp4Path,
+    required String seekSeconds,
+  }) async {
+    await _run(
+      'ffmpeg',
+      [
+        '-y',
+        '-ss', seekSeconds,
+        '-i', inputPath,
+        '-map', '0:v:0',
+        '-an',
+        '-sn',
+        '-dn',
+        '-frames:v', '1',
+        '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p',
+        '-c:v', 'libx265',
+        '-profile:v', 'main',
+        '-preset', 'fast',
+        '-crf', '16',
+        '-x265-params', 'log-level=error:bframes=0:ref=1',
+        '-pix_fmt', 'yuv420p',
+        '-tag:v', 'hvc1',
+        outputMp4Path,
+      ],
+      mustSucceed: seekSeconds == '0',
+    );
   }
 
   static final Random _rng = Random();

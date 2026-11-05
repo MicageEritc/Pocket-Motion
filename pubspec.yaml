@@ -1,21 +1,21 @@
-name: dji_live_gallery
-description: DJI Osmo Pocket 4P 实况照片整理与导出工具
+name: pocket_live
+description: DJI Pocket 3 实况导出工具（Apple 原生 HEIC+MOV 实况照片 & Google Motion Photo 动态照片）
 publish_to: 'none'
-version: 2.1.0+1
+version: 2.1.1+1
 
 environment:
-  sdk: '>=3.0.0 <4.0.0'
+  sdk: '>=3.4.0 <4.0.0'
 
 dependencies:
   flutter:
     sdk: flutter
   path: ^1.9.0
-  file_picker: ^8.0.0
+  file_picker: ^8.1.2
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^3.0.0
+  flutter_lints: ^4.0.0
 
 flutter:
   uses-material-design: true

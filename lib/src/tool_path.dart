@@ -21,7 +21,6 @@ class ToolPath {
     final bundled = _bundledDir;
     if (bundled != null) {
       if (name == 'exiftool') {
-        // exiftool 脚本可能在 exiftool_lib/ 根目录或 bin/ 下
         for (final sub in ['exiftool', 'bin/exiftool']) {
           final script = p.join(p.dirname(bundled), 'exiftool_lib', sub);
           if (File(script).existsSync()) {
@@ -47,12 +46,17 @@ class ToolPath {
       }
     }
 
-    // 3. 系统常见路径
-    for (final prefix in ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin']) {
-      final path = '$prefix/$name';
-      if (File(path).existsSync()) {
-        _cache[name] = path;
-        return path;
+    // 3. 系统常见路径（优先使用 Homebrew opt 真实二进制路径）
+    for (final candidate in [
+      '/opt/homebrew/opt/$name/bin/$name',
+      '/usr/local/opt/$name/bin/$name',
+      '/opt/homebrew/bin/$name',
+      '/usr/local/bin/$name',
+      '/usr/bin/$name',
+    ]) {
+      if (File(candidate).existsSync()) {
+        _cache[name] = candidate;
+        return candidate;
       }
     }
 
