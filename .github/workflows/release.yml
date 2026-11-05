@@ -58,18 +58,40 @@ jobs:
                       deps.append(parts[0].strip())
               return deps
 
+          def get_rpaths(binary_path, orig_dir):
+              out = subprocess.check_output(["otool", "-l", binary_path], text=True)
+              lines = out.splitlines()
+              rpaths = []
+              for i, line in enumerate(lines):
+                  if "cmd LC_RPATH" in line:
+                      for j in range(i + 1, min(i + 6, len(lines))):
+                          if "path " in lines[j]:
+                              p = lines[j].strip().split("path ")[1].split(" (offset")[0].strip()
+                              if p.startswith("@loader_path/"):
+                                  p = os.path.join(orig_dir, p[len("@loader_path/"):])
+                              elif p == "@loader_path":
+                                  p = orig_dir
+                              rpaths.append(p)
+              return rpaths
+
           def is_system_lib(path):
               return path.startswith("/usr/lib/") or path.startswith("/System/Library/")
 
-          def resolve_dep(dep, orig_dir):
+          def resolve_dep(dep, orig_dir, rpaths):
               if dep.startswith("/") and os.path.exists(dep):
                   return os.path.realpath(dep)
               if dep.startswith("@loader_path/"):
                   cand = os.path.join(orig_dir, dep[len("@loader_path/"):])
                   if os.path.exists(cand):
                       return os.path.realpath(cand)
+              if dep.startswith("@rpath/"):
+                  rel = dep[len("@rpath/"):]
+                  for rp in rpaths:
+                      cand = os.path.join(rp, rel)
+                      if os.path.exists(cand):
+                          return os.path.realpath(cand)
               base = os.path.basename(dep)
-              for d in [orig_dir] + search_dirs:
+              for d in [orig_dir] + rpaths + search_dirs:
                   cand = os.path.join(d, base)
                   if os.path.exists(cand):
                       return os.path.realpath(cand)
@@ -88,6 +110,7 @@ jobs:
               visited.add(target_path)
               os.chmod(target_path, 0o755)
               target_base = os.path.basename(target_path)
+              rpaths = get_rpaths(target_path, orig_dir)
 
               for dep in get_deps(target_path):
                   if is_system_lib(dep):
@@ -95,10 +118,16 @@ jobs:
                   dep_base = os.path.basename(dep)
                   if not is_main_exe and dep_base == target_base:
                       continue
-                  if (dep.startswith("@executable_path/") or dep.startswith("@loader_path/")) and os.path.exists(os.path.join(lib_dir, dep_base)):
+
+                  expected_ref = (
+                      f"@executable_path/../lib/{dep_base}"
+                      if is_main_exe
+                      else f"@loader_path/{dep_base}"
+                  )
+                  if dep == expected_ref and os.path.exists(os.path.join(lib_dir, dep_base)):
                       continue
 
-                  real_src = resolve_dep(dep, orig_dir)
+                  real_src = resolve_dep(dep, orig_dir, rpaths)
                   if not real_src or not os.path.exists(real_src):
                       raise RuntimeError(f"Cannot resolve dylib dependency {dep} for {target_path}")
 

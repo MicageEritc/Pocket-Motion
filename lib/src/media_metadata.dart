@@ -865,12 +865,11 @@ class MediaMetadata {
     return app1.toBytes();
   }
 
-  /// 向 JPEG 字节流注入/替换 EXIF APP1 段，并可选追加 XMP APP1 段
-  static Uint8List injectJpegExifAndXmp({
-    required Uint8List jpegBytes,
-    required Uint8List exifApp1Segment,
-    Uint8List? xmpApp1Segment,
-  }) {
+  /// 向 JPEG 字节流 SOI (0xFFD8) 之后注入一个或多个 APP1 段（如 EXIF APP1 + XMP APP1），并自动剔除原有的 APP0/APP1 段
+  static Uint8List injectIntoJpeg(
+    Uint8List jpegBytes,
+    List<Uint8List> app1Segments,
+  ) {
     if (jpegBytes.length < 4 || jpegBytes[0] != 0xFF || jpegBytes[1] != 0xD8) {
       return jpegBytes;
     }
@@ -890,12 +889,26 @@ class MediaMetadata {
 
     final out = BytesBuilder();
     out.add([0xFF, 0xD8]);
-    out.add(exifApp1Segment);
-    if (xmpApp1Segment != null) {
-      out.add(xmpApp1Segment);
+    for (final seg in app1Segments) {
+      out.add(seg);
     }
     out.add(jpegBytes.sublist(pos));
     return out.toBytes();
+  }
+
+  /// 向 JPEG 字节流注入/替换 EXIF APP1 段，并可选追加 XMP APP1 段
+  static Uint8List injectJpegExifAndXmp({
+    required Uint8List jpegBytes,
+    required Uint8List exifApp1Segment,
+    Uint8List? xmpApp1Segment,
+  }) {
+    return injectIntoJpeg(
+      jpegBytes,
+      [
+        exifApp1Segment,
+        if (xmpApp1Segment != null) xmpApp1Segment,
+      ],
+    );
   }
 
   /// 将源 MP4 转换为带完整 Apple Live Photo 元数据的 QuickTime MOV
