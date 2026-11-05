@@ -22,18 +22,141 @@ jobs:
           flutter-version: '3.47.0'
       - run: flutter pub get
       - run: flutter build macos --release
-      - name: Install and bundle ffmpeg
+      - name: Install ffmpeg via Homebrew
+        run: brew install ffmpeg
+      - name: Bundle standalone ffmpeg and all transitive dylibs
+        shell: python3 {0}
         run: |
-          brew install ffmpeg
+          import glob, os, shutil, subprocess
+
+          app_dir = "build/macos/Build/Products/Release/Pocket Motion.app"
+          res_dir = os.path.join(app_dir, "Contents", "Resources")
+          bin_dir = os.path.join(res_dir, "bin")
+          lib_dir = os.path.join(res_dir, "lib")
+          os.makedirs(bin_dir, exist_ok=True)
+          os.makedirs(lib_dir, exist_ok=True)
+
+          brew_ffmpeg = os.path.realpath(shutil.which("ffmpeg"))
+          ffmpeg_bin = os.path.join(bin_dir, "ffmpeg")
+          shutil.copy2(brew_ffmpeg, ffmpeg_bin)
+          os.chmod(ffmpeg_bin, 0o755)
+
+          brew_prefix = subprocess.check_output(["brew", "--prefix"], text=True).strip()
+          search_dirs = [
+              os.path.join(brew_prefix, "lib"),
+              "/opt/homebrew/lib",
+              "/usr/local/lib",
+          ]
+
+          def get_deps(binary_path):
+              out = subprocess.check_output(["otool", "-L", binary_path], text=True)
+              lines = out.strip().splitlines()[1:]
+              deps = []
+              for line in lines:
+                  parts = line.strip().split(" (compatibility")
+                  if parts and parts[0].strip():
+                      deps.append(parts[0].strip())
+              return deps
+
+          def is_system_lib(path):
+              return path.startswith("/usr/lib/") or path.startswith("/System/Library/")
+
+          def resolve_dep(dep, orig_dir):
+              if dep.startswith("/") and os.path.exists(dep):
+                  return os.path.realpath(dep)
+              if dep.startswith("@loader_path/"):
+                  cand = os.path.join(orig_dir, dep[len("@loader_path/"):])
+                  if os.path.exists(cand):
+                      return os.path.realpath(cand)
+              base = os.path.basename(dep)
+              for d in [orig_dir] + search_dirs:
+                  cand = os.path.join(d, base)
+                  if os.path.exists(cand):
+                      return os.path.realpath(cand)
+              matches = glob.glob(os.path.join(brew_prefix, "Cellar", "**", base), recursive=True)
+              if matches:
+                  return os.path.realpath(matches[0])
+              return None
+
+          queue = [(ffmpeg_bin, True, os.path.dirname(brew_ffmpeg))]
+          visited = set()
+
+          while queue:
+              target_path, is_main_exe, orig_dir = queue.pop(0)
+              if target_path in visited:
+                  continue
+              visited.add(target_path)
+              os.chmod(target_path, 0o755)
+              target_base = os.path.basename(target_path)
+
+              for dep in get_deps(target_path):
+                  if is_system_lib(dep):
+                      continue
+                  dep_base = os.path.basename(dep)
+                  if not is_main_exe and dep_base == target_base:
+                      continue
+                  if (dep.startswith("@executable_path/") or dep.startswith("@loader_path/")) and os.path.exists(os.path.join(lib_dir, dep_base)):
+                      continue
+
+                  real_src = resolve_dep(dep, orig_dir)
+                  if not real_src or not os.path.exists(real_src):
+                      raise RuntimeError(f"Cannot resolve dylib dependency {dep} for {target_path}")
+
+                  dylib_name = os.path.basename(real_src)
+                  bundled_dylib = os.path.join(lib_dir, dylib_name)
+                  if not os.path.exists(bundled_dylib):
+                      shutil.copy2(real_src, bundled_dylib)
+                      os.chmod(bundled_dylib, 0o755)
+                      subprocess.run(
+                          ["install_name_tool", "-id", f"@loader_path/{dylib_name}", bundled_dylib],
+                          check=True,
+                      )
+                      queue.append((bundled_dylib, False, os.path.dirname(real_src)))
+
+                  new_ref = (
+                      f"@executable_path/../lib/{dylib_name}"
+                      if is_main_exe
+                      else f"@loader_path/{dylib_name}"
+                  )
+                  subprocess.run(
+                      ["install_name_tool", "-change", dep, new_ref, target_path],
+                      check=True,
+                  )
+
+          all_bins = [ffmpeg_bin] + [
+              os.path.join(lib_dir, f) for f in os.listdir(lib_dir) if f.endswith(".dylib")
+          ]
+          for b in all_bins:
+              b_base = os.path.basename(b)
+              for d in get_deps(b):
+                  if os.path.basename(d) == b_base:
+                      continue
+                  if "/opt/homebrew" in d or "/usr/local" in d or d.startswith("@rpath/"):
+                      raise RuntimeError(f"Unbundled external dependency remaining in {b}: {d}")
+
+          print(f"Successfully bundled {len(all_bins) - 1} dylibs and verified zero external Homebrew paths.")
+      - name: Sign app bundle and verify standalone execution without Homebrew
+        run: |
           APP="build/macos/Build/Products/Release/Pocket Motion.app"
           RES="$APP/Contents/Resources"
-          mkdir -p "$RES/bin"
-          cp "$(which ffmpeg)" "$RES/bin/ffmpeg"
-          chmod +x "$RES/bin/ffmpeg"
-          # 重新对整个 .app 签名，防止修改 Resources 后因签名封印失效被 macOS 判定为“文件已损坏”
           xattr -cr "$APP"
+          for f in "$RES/lib/"*.dylib; do
+            codesign --force --sign - "$f"
+          done
+          codesign --force --sign - "$RES/bin/ffmpeg"
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --strict "$APP"
+
+          # 移除 Runner 上的 Homebrew 库目录后实测抽帧与 HEVC 编码，确保在任何未安装 Homebrew 的用户 Mac 上 100% 独立运行
+          BREW_PREFIX="$(brew --prefix)"
+          sudo mv "$BREW_PREFIX/Cellar" "$BREW_PREFIX/Cellar_hidden"
+          sudo mv "$BREW_PREFIX/opt" "$BREW_PREFIX/opt_hidden"
+          sudo mv "$BREW_PREFIX/lib" "$BREW_PREFIX/lib_hidden"
+          "$RES/bin/ffmpeg" -version
+          "$RES/bin/ffmpeg" -y -f lavfi -i color=c=teal:s=64x64:d=0.5 -frames:v 1 /tmp/ci_verify.jpg
+          "$RES/bin/ffmpeg" -y -f lavfi -i color=c=teal:s=64x64:d=0.5 -frames:v 1 -c:v libx265 -pix_fmt yuv420p -tag:v hvc1 /tmp/ci_verify_hevc.mp4
+          test -s /tmp/ci_verify.jpg
+          test -s /tmp/ci_verify_hevc.mp4
       - name: Package DMG
         run: |
           mkdir -p /tmp/dmg
@@ -68,7 +191,6 @@ jobs:
             }
           }
 
-          # 下载并解压 ffmpeg 静态构建
           curl.exe -fL --retry 3 "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -o ffmpeg.zip
           Expand-Archive -LiteralPath ffmpeg.zip -DestinationPath ffmpeg_tmp -Force
           $ffExe = Get-ChildItem ffmpeg_tmp -Recurse -File -Filter "ffmpeg.exe" | Select-Object -First 1

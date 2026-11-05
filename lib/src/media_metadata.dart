@@ -32,10 +32,11 @@ class _VideoTrackTiming {
   });
 }
 
-/// 纯 Dart 跨平台媒体元数据引擎（不依赖外部 Perl / exiftool 进程，彻底杜绝 Windows 中文路径与运行库缺失问题）：
+/// 纯 Dart 跨平台媒体元数据与容器封装引擎（零外部 Perl / exiftool 依赖，彻底兼容中英文路径与无 Homebrew 环境）：
 /// 1. 从源 MP4 提取真实设备品牌/型号、拍摄时间与 GPS 信息；
-/// 2. 直接构造标准 TIFF/EXIF APP1 段（含 IFD0、ExifIFD、ExifImageWidth/Height 及完整 Apple iOS MakerNote）写入 JPG；
-/// 3. 直接在 MOV 的 moov 原子中更新 mvhd/tkhd/mdhd 时间戳、注入 com.apple.quicktime.still-image-time (mebx) 定时元数据轨
+/// 2. 从单帧 HEVC MP4 提取 hvcC 与 hvc1 码流，纯 Dart 封装为原生 Apple 实况 .HEIC 容器并写入 Exif 与完整 Apple MakerNote；
+/// 3. 直接构造标准 TIFF/EXIF APP1 段用于 Google Motion Photo (.jpg)；
+/// 4. 直接在 .MOV 的 moov 原子中更新 mvhd/tkhd/mdhd 时间戳、注入 com.apple.quicktime.still-image-time (mebx) 定时元数据轨
 ///    以及 Apple QuickTime mdta (Keys:ContentIdentifier / Make / Model / CreationDate / LivePhotoAuto / VitalityScore)。
 class MediaMetadata {
   static const int _qtEpochOffset = 2082844800; // 1904-01-01 至 1970-01-01 秒数
@@ -254,6 +255,290 @@ class MediaMetadata {
     return null;
   }
 
+  /// 从单帧 HEVC MP4 文件（由 ffmpeg -frames:v 1 -c:v libx265 -tag:v hvc1 生成）提取 hvcC 与帧数据，
+  /// 纯 Dart 封装为标准 ISO/IEC 23008-12 原生 .HEIC 文件并内嵌完整 EXIF + Apple MakerNote。
+  static Future<void> buildHeicFromHevcMp4({
+    required String hevcMp4Path,
+    required String outHeicPath,
+    required String make,
+    required String model,
+    required String uuid,
+    DateTime? shotAt,
+  }) async {
+    final mp4Bytes = await File(hevcMp4Path).readAsBytes();
+    final (width, height, hvccBox, hevcSample) = _extractHevcFrameFromMp4(mp4Bytes);
+
+    final app1 = buildExifApp1Segment(
+      make: make,
+      model: model,
+      shotAt: shotAt,
+      livePhotoUuid: uuid,
+      imageWidth: width,
+      imageHeight: height,
+    );
+    final exifPayload = app1.sublist(4); // 从 "Exif\0\0" 开始
+    final exifItem = (BytesBuilder()
+          ..add([0x00, 0x00, 0x00, 0x06])
+          ..add(exifPayload))
+        .toBytes();
+
+    final ftyp = _wrapAtom(
+      'ftyp',
+      Uint8List.fromList([
+        ...'heic'.codeUnits,
+        0x00, 0x00, 0x00, 0x00,
+        ...'mif1'.codeUnits,
+        ...'miaf'.codeUnits,
+        ...'heic'.codeUnits,
+      ]),
+    );
+
+    final hdlr = _wrapFullBox(
+      'hdlr',
+      0,
+      0,
+      Uint8List.fromList([
+        0x00, 0x00, 0x00, 0x00,
+        ...'pict'.codeUnits,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00,
+      ]),
+    );
+
+    final pitm = _wrapFullBox(
+      'pitm',
+      0,
+      0,
+      Uint8List.fromList([0x00, 0x01]),
+    );
+
+    final infe1 = _wrapFullBox(
+      'infe',
+      2,
+      0,
+      Uint8List.fromList([
+        0x00, 0x01,
+        0x00, 0x00,
+        ...'hvc1'.codeUnits,
+        0x00,
+      ]),
+    );
+    final infe2 = _wrapFullBox(
+      'infe',
+      2,
+      1,
+      Uint8List.fromList([
+        0x00, 0x02,
+        0x00, 0x00,
+        ...'Exif'.codeUnits,
+        0x00,
+      ]),
+    );
+    final iinf = _wrapFullBox(
+      'iinf',
+      0,
+      0,
+      (BytesBuilder()
+            ..add([0x00, 0x02])
+            ..add(infe1)
+            ..add(infe2))
+          .toBytes(),
+    );
+
+    final cdsc = _wrapAtom(
+      'cdsc',
+      Uint8List.fromList([
+        0x00, 0x02,
+        0x00, 0x01,
+        0x00, 0x01,
+      ]),
+    );
+    final iref = _wrapFullBox('iref', 0, 0, cdsc);
+
+    final colr = _wrapAtom(
+      'colr',
+      Uint8List.fromList([
+        ...'nclx'.codeUnits,
+        0x00, 0x01,
+        0x00, 0x01,
+        0x00, 0x06,
+        0x80,
+      ]),
+    );
+    final ispeBd = ByteData(8)
+      ..setUint32(0, width, Endian.big)
+      ..setUint32(4, height, Endian.big);
+    final ispe = _wrapFullBox('ispe', 0, 0, ispeBd.buffer.asUint8List());
+    final pixi = _wrapFullBox(
+      'pixi',
+      0,
+      0,
+      Uint8List.fromList([0x03, 0x08, 0x08, 0x08]),
+    );
+    final ipco = _wrapAtom(
+      'ipco',
+      (BytesBuilder()
+            ..add(colr)
+            ..add(hvccBox)
+            ..add(ispe)
+            ..add(pixi))
+          .toBytes(),
+    );
+    final ipma = _wrapFullBox(
+      'ipma',
+      0,
+      0,
+      Uint8List.fromList([
+        0x00, 0x00, 0x00, 0x01,
+        0x00, 0x01,
+        0x04,
+        0x01,
+        0x82,
+        0x03,
+        0x04,
+      ]),
+    );
+    final iprp = _wrapAtom(
+      'iprp',
+      (BytesBuilder()
+            ..add(ipco)
+            ..add(ipma))
+          .toBytes(),
+    );
+
+    const ilocBoxSize = 44;
+    final metaTotalSize = 12 +
+        hdlr.length +
+        pitm.length +
+        ilocBoxSize +
+        iinf.length +
+        iref.length +
+        iprp.length;
+    final mdatHeaderOffset = ftyp.length + metaTotalSize;
+    final hevcOffset = mdatHeaderOffset + 8;
+    final exifOffset = hevcOffset + hevcSample.length;
+
+    final ilocBd = ByteData(32)
+      ..setUint8(0, 0x44)
+      ..setUint8(1, 0x00)
+      ..setUint16(2, 2, Endian.big)
+      ..setUint16(4, 1, Endian.big)
+      ..setUint16(6, 0, Endian.big)
+      ..setUint16(8, 1, Endian.big)
+      ..setUint32(10, hevcOffset, Endian.big)
+      ..setUint32(14, hevcSample.length, Endian.big)
+      ..setUint16(18, 2, Endian.big)
+      ..setUint16(20, 0, Endian.big)
+      ..setUint16(22, 1, Endian.big)
+      ..setUint32(24, exifOffset, Endian.big)
+      ..setUint32(28, exifItem.length, Endian.big);
+    final iloc = _wrapFullBox('iloc', 0, 0, ilocBd.buffer.asUint8List());
+
+    final meta = _wrapFullBox(
+      'meta',
+      0,
+      0,
+      (BytesBuilder()
+            ..add(hdlr)
+            ..add(pitm)
+            ..add(iloc)
+            ..add(iinf)
+            ..add(iref)
+            ..add(iprp))
+          .toBytes(),
+    );
+
+    final mdat = _wrapAtom(
+      'mdat',
+      (BytesBuilder()
+            ..add(hevcSample)
+            ..add(exifItem))
+          .toBytes(),
+    );
+
+    final outHeic = BytesBuilder()
+      ..add(ftyp)
+      ..add(meta)
+      ..add(mdat);
+    await File(outHeicPath).writeAsBytes(outHeic.toBytes());
+  }
+
+  static (int width, int height, Uint8List hvccBox, Uint8List hevcSample)
+      _extractHevcFrameFromMp4(Uint8List b) {
+    int width = 0;
+    int height = 0;
+    Uint8List? hvccBox;
+    int sampleOffset = 0;
+    int sampleSize = 0;
+
+    void walk(int start, int end) {
+      int p = start;
+      while (p + 8 <= end) {
+        final bd = ByteData.sublistView(b, p, p + 8);
+        int sz = bd.getUint32(0);
+        final typ = latin1.decode(b.sublist(p + 4, p + 8));
+        int hdrLen = 8;
+        if (sz == 1 && p + 16 <= end) {
+          sz = ByteData.sublistView(b, p + 8, p + 16).getUint64(0);
+          hdrLen = 16;
+        } else if (sz == 0) {
+          sz = end - p;
+        }
+        if (sz < hdrLen || p + sz > end) break;
+
+        if (typ == 'moov' ||
+            typ == 'trak' ||
+            typ == 'mdia' ||
+            typ == 'minf' ||
+            typ == 'stbl') {
+          walk(p + hdrLen, p + sz);
+        } else if (typ == 'stsd' && p + 16 + 86 <= p + sz) {
+          final ep = p + 16;
+          final eBd = ByteData.sublistView(b, ep, ep + 36);
+          final esz = eBd.getUint32(0);
+          width = eBd.getUint16(32);
+          height = eBd.getUint16(34);
+          int sp = ep + 86;
+          final eEnd = (ep + esz <= p + sz) ? ep + esz : p + sz;
+          while (sp + 8 <= eEnd) {
+            final ssz = ByteData.sublistView(b, sp, sp + 4).getUint32(0);
+            final styp = latin1.decode(b.sublist(sp + 4, sp + 8));
+            if (ssz < 8 || sp + ssz > eEnd) break;
+            if (styp == 'hvcC') {
+              hvccBox = b.sublist(sp, sp + ssz);
+              break;
+            }
+            sp += ssz;
+          }
+        } else if (typ == 'stsz' && p + 20 <= p + sz) {
+          final sBd = ByteData.sublistView(b, p + 12, p + sz);
+          sampleSize = sBd.getUint32(0);
+          if (sampleSize == 0 && p + 24 <= p + sz) {
+            sampleSize = sBd.getUint32(8);
+          }
+        } else if (typ == 'stco' && p + 20 <= p + sz) {
+          sampleOffset = ByteData.sublistView(b, p + 16, p + 20).getUint32(0);
+        } else if (typ == 'co64' && p + 24 <= p + sz) {
+          sampleOffset = ByteData.sublistView(b, p + 16, p + 24).getUint64(0);
+        }
+        p += sz;
+      }
+    }
+
+    walk(0, b.length);
+    if (hvccBox == null || sampleSize <= 0 || sampleOffset + sampleSize > b.length) {
+      throw StateError('无法从临时 HEVC 帧文件中提取有效的 hvcC 或图像码流');
+    }
+    return (
+      width,
+      height,
+      hvccBox!,
+      b.sublist(sampleOffset, sampleOffset + sampleSize),
+    );
+  }
+
   /// 从 JPEG 字节流解析 SOF0/SOF2 帧头中的真实图像宽高
   static (int width, int height)? extractJpegDimensions(Uint8List jpg) {
     if (jpg.length < 4 || jpg[0] != 0xFF || jpg[1] != 0xD8) return null;
@@ -275,7 +560,6 @@ class MediaMetadata {
       if (marker == 0xDA || pos + 2 > jpg.length) break;
       final segLen = (jpg[pos] << 8) | jpg[pos + 1];
       if (segLen < 2 || pos + segLen > jpg.length) break;
-      // SOF0 / SOF1 / SOF2
       if ((marker == 0xC0 || marker == 0xC1 || marker == 0xC2) && segLen >= 7) {
         final h = (jpg[pos + 3] << 8) | jpg[pos + 4];
         final w = (jpg[pos + 5] << 8) | jpg[pos + 6];
@@ -368,12 +652,11 @@ class MediaMetadata {
     final exifIfdOffset = data0Offset + blobs0.length;
     addEntry(ifd0Entries, blobs0, data0Offset, 0x8769, 4, 1, u32(exifIfdOffset));
 
-    // ExifIFD 条目（按 Tag 升序排列）
     final hasDims = imageWidth != null && imageHeight != null && imageWidth > 0 && imageHeight > 0;
     int numExif = 3; // 0x9000, 0x9101, 0xA001
     if (hasDate) numExif += 5;
     if (livePhotoUuid != null) numExif += 1;
-    if (hasDims) numExif += 2; // 0xA002 ExifImageWidth, 0xA003 ExifImageHeight (LONG=4)
+    if (hasDims) numExif += 2;
 
     final data1Offset = exifIfdOffset + 2 + numExif * 12 + 4;
     final exifEntries = BytesBuilder();
@@ -423,7 +706,7 @@ class MediaMetadata {
     }
 
     final tiff = BytesBuilder()
-      ..add([0x4D, 0x4D, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08]) // "MM\0*\0\0\0\x08"
+      ..add([0x4D, 0x4D, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08])
       ..add(u16(numIfd0))
       ..add(ifd0Entries.toBytes())
       ..add(u32(0))
@@ -434,7 +717,7 @@ class MediaMetadata {
       ..add(blobs1.toBytes());
 
     final payload = BytesBuilder()
-      ..add([0x45, 0x78, 0x69, 0x66, 0x00, 0x00]) // "Exif\0\0"
+      ..add([0x45, 0x78, 0x69, 0x66, 0x00, 0x00])
       ..add(tiff.toBytes());
     final payloadBytes = payload.toBytes();
     final segLen = payloadBytes.length + 2;
@@ -497,12 +780,7 @@ class MediaMetadata {
     return out.toBytes();
   }
 
-  /// 纯 Dart 为 MOV 写入完整 Apple Live Photo 元数据：
-  /// 1. 确保顶层 ftyp 为标准 Apple QuickTime ('qt  ')；
-  /// 2. 追加 25 字节 still-image-time 样本并在 moov 中注入 com.apple.quicktime.still-image-time (mebx) 定时元数据轨（含 tref/cdsc 关联视频轨），
-  ///    使 iPhone 相册支持滑动自动播放（Vitality）、编辑模式任意切换封面帧，以及 Mimo 二次编辑封面不跳帧；
-  /// 3. 写入顶层 moov/meta (ContentIdentifier / Make / Model / CreationDate / LivePhotoAuto / VitalityScore)；
-  /// 4. 同步更新 mvhd / tkhd / mdhd 拍摄时间戳。
+  /// 纯 Dart 为 MOV 写入完整 Apple Live Photo 元数据
   static Future<void> writeMovLivePhotoMetadata({
     required String srcMp4Path,
     required String outMovPath,
@@ -552,7 +830,6 @@ class MediaMetadata {
       return;
     }
 
-    // 若顶层 ftyp 不是 'qt  '，原地将 major_brand 修正为 'qt  '
     if (ftypPos >= 0 && ftypSize >= 16) {
       buf[ftypPos + 8] = 0x71; // 'q'
       buf[ftypPos + 9] = 0x74; // 't'
@@ -568,12 +845,10 @@ class MediaMetadata {
         ? (shotAt.toUtc().millisecondsSinceEpoch ~/ 1000) + _qtEpochOffset
         : 0;
 
-    // 1. 更新 moov 内 mvhd / tkhd / mdhd 的创建时间与修改时间
     if (qtSec > 0) {
       _patchMoovTimestamps(moovBody, 0, moovBody.length, qtSec);
     }
 
-    // 2. 解析 mvhd 时间基/总时长与最大 trackId，以及视频轨时间基与单帧时长
     final (movieTimescale, movieDuration, maxTrackId) = _readMvhdInfo(moovBody);
     final videoTiming = _findVideoTrackTiming(
       moovBody,
@@ -583,10 +858,6 @@ class MediaMetadata {
     final metaTrackId = maxTrackId + 1;
     _updateMvhdNextTrackId(moovBody, metaTrackId + 1);
 
-    // 3. 构造 still-image-time 的 3 个连续样本（共 25 字节）：
-    //    Sample 1: [0 .. coverTicks] 空样本 (8B: 00000008 00000000)
-    //    Sample 2: [coverTicks .. coverTicks + frameDelta] still-image-time = -1 (9B: 00000009 00000001 FF)
-    //    Sample 3: [coverTicks + frameDelta .. videoDuration] 空样本 (8B: 00000008 00000000)
     final metaSamplesPayload = Uint8List.fromList([
       0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00,
       0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x01, 0xFF,
@@ -594,13 +865,11 @@ class MediaMetadata {
     ]);
     final metaMdatAtom = _wrapAtom('mdat', metaSamplesPayload);
 
-    // 计算追加在最后的 metaMdatAtom 内部样本起始偏移（不移动原有 mdat，原视频/音频 stco 零偏移改动）
     final isMoovAtEnd = (moovPos + moovSize == buf.length);
     final int metaChunkFileOffset = isMoovAtEnd
         ? (moovPos + 8)
         : (buf.length + 8);
 
-    // 4. 构造 Apple 定时元数据轨 (com.apple.quicktime.still-image-time)
     final stillImageMetaTrak = _buildStillImageTimeTrak(
       metaTrackId: metaTrackId,
       videoTrackId: videoTiming.trackId,
@@ -614,7 +883,6 @@ class MediaMetadata {
       metaChunkFileOffset: metaChunkFileOffset,
     );
 
-    // 5. 过滤 moov：仅保留 mvhd 与音视频 trak（剔除旧 meta、udta 及私有非音视频轨道如 dbgi）
     final filteredMoovBody = BytesBuilder();
     int bPos = 0;
     while (bPos + 8 <= moovBody.length) {
@@ -635,10 +903,8 @@ class MediaMetadata {
       bPos += sz;
     }
 
-    // 加入新建的 still-image-time 定时元数据轨
     filteredMoovBody.add(stillImageMetaTrak);
 
-    // 6. 构造标准 Apple QuickTime mdta meta 原子（含实况自动播放与活力评分标签）
     final metaAtom = _buildQtMdtaLivePhotoMetaAtom(
       uuid: uuid,
       make: make,
@@ -883,7 +1149,6 @@ class MediaMetadata {
     );
     final int totalMetaVideoTicks = coverTicks + oneFrameTicks + tailTicks;
 
-    // 1. tkhd (92 bytes, version 0, flags = 0x0000000F)
     final tkhdPayload = ByteData(84)
       ..setUint32(0, 0x0000000F, Endian.big)
       ..setUint32(4, qtSec & 0xFFFFFFFF, Endian.big)
@@ -896,12 +1161,10 @@ class MediaMetadata {
       ..setUint32(72, 0x40000000, Endian.big);
     final tkhdAtom = _wrapAtom('tkhd', tkhdPayload.buffer.asUint8List());
 
-    // 2. tref -> cdsc (关联到视频轨 ID，声明此元数据轨描述主视频轨)
     final cdscPayload = ByteData(4)..setUint32(0, videoTrackId, Endian.big);
     final cdscAtom = _wrapAtom('cdsc', cdscPayload.buffer.asUint8List());
     final trefAtom = _wrapAtom('tref', cdscAtom);
 
-    // 3. edts -> elst (1 条目，从 0 开始覆盖整条轨道)
     final elstPayload = ByteData(20)
       ..setUint32(0, 0, Endian.big)
       ..setUint32(4, 1, Endian.big)
@@ -911,7 +1174,6 @@ class MediaMetadata {
     final elstAtom = _wrapAtom('elst', elstPayload.buffer.asUint8List());
     final edtsAtom = _wrapAtom('edts', elstAtom);
 
-    // 4. mdia -> mdhd (32 bytes)
     final mdhdPayload = ByteData(24)
       ..setUint32(0, 0, Endian.big)
       ..setUint32(4, qtSec & 0xFFFFFFFF, Endian.big)
@@ -922,14 +1184,13 @@ class MediaMetadata {
       ..setUint16(22, 0, Endian.big);
     final mdhdAtom = _wrapAtom('mdhd', mdhdPayload.buffer.asUint8List());
 
-    // 5. mdia -> hdlr (mhlr / meta / appl, 'Core Media Metadata')
     final mdiaHdlrAtom = _wrapAtom(
       'hdlr',
       Uint8List.fromList([
         0x00, 0x00, 0x00, 0x00,
-        0x6D, 0x68, 0x6C, 0x72, // 'mhlr'
-        0x6D, 0x65, 0x74, 0x61, // 'meta'
-        0x61, 0x70, 0x70, 0x6C, // 'appl'
+        0x6D, 0x68, 0x6C, 0x72,
+        0x6D, 0x65, 0x74, 0x61,
+        0x61, 0x70, 0x70, 0x6C,
         0x00, 0x00, 0x00, 0x01,
         0x00, 0x00, 0x00, 0x00,
         0x13,
@@ -937,12 +1198,11 @@ class MediaMetadata {
       ]),
     );
 
-    // 6. minf -> gmhd -> gmin
     final gmhdAtom = _wrapAtom(
       'gmhd',
       Uint8List.fromList([
         0x00, 0x00, 0x00, 0x18,
-        0x67, 0x6D, 0x69, 0x6E, // 'gmin'
+        0x67, 0x6D, 0x69, 0x6E,
         0x00, 0x00, 0x00, 0x00,
         0x00, 0x40, 0x80, 0x00,
         0x80, 0x00, 0x80, 0x00,
@@ -950,14 +1210,13 @@ class MediaMetadata {
       ]),
     );
 
-    // 7. minf -> hdlr (dhlr / alis / appl, 'Core Media Data Handler')
     final minfHdlrAtom = _wrapAtom(
       'hdlr',
       Uint8List.fromList([
         0x00, 0x00, 0x00, 0x00,
-        0x64, 0x68, 0x6C, 0x72, // 'dhlr'
-        0x61, 0x6C, 0x69, 0x73, // 'alis'
-        0x61, 0x70, 0x70, 0x6C, // 'appl'
+        0x64, 0x68, 0x6C, 0x72,
+        0x61, 0x6C, 0x69, 0x73,
+        0x61, 0x70, 0x70, 0x6C,
         0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00,
         0x17,
@@ -965,21 +1224,19 @@ class MediaMetadata {
       ]),
     );
 
-    // 8. minf -> dinf -> dref -> alis
     final dinfAtom = _wrapAtom(
       'dinf',
       Uint8List.fromList([
         0x00, 0x00, 0x00, 0x1C,
-        0x64, 0x72, 0x65, 0x66, // 'dref'
+        0x64, 0x72, 0x65, 0x66,
         0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x01,
         0x00, 0x00, 0x00, 0x0C,
-        0x61, 0x6C, 0x69, 0x73, // 'alis'
+        0x61, 0x6C, 0x69, 0x73,
         0x00, 0x00, 0x00, 0x01,
       ]),
     );
 
-    // 9. stbl -> stsd (mebx: mdta/com.apple.quicktime.still-image-time, dtyp = SInt8 [0x41])
     final stsdAtom = Uint8List.fromList([
       0x00, 0x00, 0x00, 0x70, 0x73, 0x74, 0x73, 0x64,
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
@@ -994,7 +1251,6 @@ class MediaMetadata {
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x41,
     ]);
 
-    // 10. stbl -> stts
     final sttsPayload = ByteData(32)
       ..setUint32(0, 0, Endian.big)
       ..setUint32(4, 3, Endian.big)
@@ -1006,7 +1262,6 @@ class MediaMetadata {
       ..setUint32(28, tailTicks, Endian.big);
     final sttsAtom = _wrapAtom('stts', sttsPayload.buffer.asUint8List());
 
-    // 11. stbl -> stsc
     final stscPayload = ByteData(20)
       ..setUint32(0, 0, Endian.big)
       ..setUint32(4, 1, Endian.big)
@@ -1015,7 +1270,6 @@ class MediaMetadata {
       ..setUint32(16, 1, Endian.big);
     final stscAtom = _wrapAtom('stsc', stscPayload.buffer.asUint8List());
 
-    // 12. stbl -> stsz
     final stszPayload = ByteData(24)
       ..setUint32(0, 0, Endian.big)
       ..setUint32(4, 0, Endian.big)
@@ -1025,7 +1279,6 @@ class MediaMetadata {
       ..setUint32(20, 8, Endian.big);
     final stszAtom = _wrapAtom('stsz', stszPayload.buffer.asUint8List());
 
-    // 13. stbl -> stco
     final stcoPayload = ByteData(12)
       ..setUint32(0, 0, Endian.big)
       ..setUint32(4, 1, Endian.big)
@@ -1104,7 +1357,6 @@ class MediaMetadata {
     }
   }
 
-  /// 构造包含 ContentIdentifier、Make、Model、CreationDate 以及 LivePhotoAuto / VitalityScore 的 QuickTime mdta meta 原子
   static Uint8List _buildQtMdtaLivePhotoMetaAtom({
     required String uuid,
     required String make,
@@ -1112,10 +1364,10 @@ class MediaMetadata {
     String? creationDateIso,
   }) {
     final hdlrPayload = Uint8List(24);
-    hdlrPayload[8] = 0x6D; // 'm'
-    hdlrPayload[9] = 0x64; // 'd'
-    hdlrPayload[10] = 0x74; // 't'
-    hdlrPayload[11] = 0x61; // 'a'
+    hdlrPayload[8] = 0x6D;
+    hdlrPayload[9] = 0x64;
+    hdlrPayload[10] = 0x74;
+    hdlrPayload[11] = 0x61;
     final hdlrAtom = _wrapAtom('hdlr', hdlrPayload);
 
     final items = <(String, int, Uint8List)>[
@@ -1218,13 +1470,18 @@ class MediaMetadata {
         .toBytes();
   }
 
-  /// 构造包含完整实况标签的 Apple iOS MakerNote 二进制块：
-  /// - 0x0001 MakerNoteVersion = 14
-  /// - 0x0003 RunTime = bplist00 {epoch: 0, flags: 1, timescale: 600, value: 900} (1.5s)
-  /// - 0x0008 AccelerationVector = [0/1, -1/1, 0/1]
-  /// - 0x0011 ContentIdentifier = uuid
-  /// - 0x0014 ImageCaptureType = 10 (Photo)
-  /// - 0x0017 LivePhotoVideoIndex = 900
+  static Uint8List _wrapFullBox(String type, int version, int flags, Uint8List payload) {
+    final vf = ByteData(4)
+      ..setUint32(0, ((version & 0xFF) << 24) | (flags & 0xFFFFFF), Endian.big);
+    return _wrapAtom(
+      type,
+      (BytesBuilder()
+            ..add(vf.buffer.asUint8List())
+            ..add(payload))
+          .toBytes(),
+    );
+  }
+
   static Uint8List _buildAppleMakerNote(String uuid) {
     const runTimeBplist = <int>[
       98, 112, 108, 105, 115, 116, 48, 48, 212, 1, 2, 3, 4, 5, 6, 7, 8, 85,

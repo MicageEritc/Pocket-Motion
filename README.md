@@ -7,8 +7,8 @@
 大疆 Osmo Pocket 4P 拍摄的「实况照片」在存储卡内是一段约 3 秒的 `.MP4` 视频，内部保留着真实的拍摄时间与相机设备信息。  
 但如果通过手机 Mimo 导出为实况照片，往往会出现以下问题：
 
-- **拍摄时间丢失或被篡改**：导出的静态图 `.JPG` 拍摄时间被清空，或视频 `.MOV` 的创建时间被刷成导出当天的时刻；
-- **脱离手机相册后无法配对**：备份到 NAS（群晖 Synology Photos、Immich、MT Photos 等）或导入电脑相册时，时间线全部错乱，或无法识别为动态实况照片。
+- **拍摄时间丢失或被篡改**：导出的静态图拍摄时间被清空，或视频 `.MOV` 的创建时间被刷成导出当天的时刻；
+- **脱离手机相册后无法配对**：备份到 NAS（绿联云、极空间、群晖 Synology Photos、Immich、MT Photos 等）或导入电脑相册时，时间线全部错乱，或无法识别为动态实况照片。
 
 **Pocket Motion** 直接读取相机 SD 卡或本地备份目录中的原始素材，自动区分实况照片、普通视频与静态照片并按分类子文件夹完成导出，**完整保留原始拍摄时间戳与相机设备信息（`DJI` / `DJI OsmoPocket4P`）**，且源文件不会被修改。
 
@@ -17,13 +17,13 @@
 - **精准识别三类素材**：扫描文件前部 512 KB 的私有数据轨模板标识（`TPLG_VIDEO_LIVEPHOTO_*`），毫秒级区分「实况照片」、「普通视频」与「静态照片」。
 - **支持实况、视频与照片全类型导出，自动按目录归档**：
   - **实况照片（导出至 `live/` 文件夹）**：
-    - **Apple 实况照片（`.JPG` + `.MOV`）**：抽帧生成静态 `.JPG` 并注入标准 Apple iOS MakerNote（`0x0011 ContentIdentifier`），同时对 `.MOV` 零重编码写入配对 `Keys:ContentIdentifier` UUID 与轨道时间戳，导入 iPhone / macOS「照片」App 及主流 NAS 相册即可自动合并为一张实况照片。
+    - **Apple 原生实况照片（`.HEIC` + `.MOV`）**：抽取 1.5s 关键帧编码为单帧 HEVC（`hvc1`）并由纯 Dart 封装为标准 ISO/IEC 23008-12 原生 `.HEIC` 图像，内嵌完整 EXIF 与 Apple iOS MakerNote（含 `ContentIdentifier`、`RunTime`、`AccelerationVector`、`LivePhotoVideoIndex`）；同时对 `.MOV` 零重编码封装并写入 `com.apple.quicktime.still-image-time`（`mebx`）定时元数据轨与配对 `Keys:ContentIdentifier` UUID，完美支持 **iPhone 相册滑动自动播放（Vitality）**、**iPhone 相册编辑任意重选封面帧**，以及 **Mimo 二次滤镜调色封面不跳帧**。
     - **Android / Google 动态照片（单文件 `.jpg`）**：抽帧并在 JPEG 头部写入标准 EXIF 与 Google `GCamera:MotionPhoto` Container XMP 目录，尾部内嵌原始 MP4 视频流，兼容 Google Photos 与主流 Android 相册。
   - **普通视频（导出至 `movie/` 文件夹）**：切换到「视频」标签后，左侧一键「导出视频」，原样无损导出至 `movie/` 目录并完整保留原始拍摄时间。
   - **静态照片（导出至 `photo/` 文件夹）**：切换到「照片」标签后，左侧一键「导出照片」，原样无损导出至 `photo/` 目录并完整保留原始拍摄时间。
 - **高效选择交互**：支持先点选首项、按住 `Shift` 键点选末项进行**区间快捷连选**，支持一键全选，且点击刷新重新扫描时自动清空已选状态。
-- **纯 Dart 原生二进制元数据引擎**：直接从源 `.MP4` 的 `moov` 原子解析真实设备品牌（`Make`）、型号（`Model`）、拍摄时间与 GPS 信息，并以纯 Dart 构造大端序 TIFF/EXIF `APP1` 段与 QuickTime `mdta` 元数据原子，完美支持中英文路径与 NAS 挂载盘。
-- **开箱即用，零环境配置**：macOS 与 Windows 发行版均已内置所需工具链，下载解压即可直接运行，无需手动安装任何命令行依赖。
+- **纯 Dart 原生二进制元数据与 HEIC 封装引擎**：直接从源 `.MP4` 的 `moov` 原子解析真实设备品牌（`Make`）、型号（`Model`）、拍摄时间与 GPS 信息，并以纯 Dart 构造 ISO/IEC 23008-12 `.HEIC` 容器、大端序 TIFF/EXIF 段与 QuickTime `mdta` / `mebx` 元数据原子，完美支持中英文路径与 NAS 挂载盘。
+- **开箱即用，零环境配置**：macOS 与 Windows 发行版均已完整内置静态/自包含 `ffmpeg` 及全部动态库依赖，下载解压即可在任何空白系统上直接运行，无需安装 Homebrew 或任何命令行工具。
 - **自动记忆目录**：自动保存上次选择的「素材来源」与「导出位置」，下次打开无需重复选择。
 
 ## 下载与安装
@@ -42,7 +42,7 @@
 1. **选择素材来源**：点击左侧「素材来源」卡片右侧的 **更改**，选择相机 SD 卡目录（如 `DCIM/DJI_001`）或本地素材文件夹，程序会自动扫描并分类统计实况、视频与照片。点击刷新按钮可重新扫描并自动取消当前已选目标。
 2. **选择导出位置**：点击「导出位置」卡片右侧的 **更改**，指定导出文件保存的根目录（路径会自动记忆）。
 3. **勾选并分类导出**：在顶部切换「实况」、「视频」或「照片」标签，可通过单击、**按住 `Shift` 键首尾区间连选**或点击 **全选** 勾选素材，点击左侧导出按钮：
-   - **实况标签**：可选 **导出为 Apple 实况照片**（生成 `live/<文件名>I.JPG` + `live/<文件名>I.MOV`）或 **导出为 Android 动态照片**（生成 `live/<文件名>A.jpg`）；
+   - **实况标签**：可选 **导出为 Apple 实况照片**（生成原生 `live/<文件名>I.HEIC` + `live/<文件名>I.MOV`）或 **导出为 Android 动态照片**（生成 `live/<文件名>A.jpg`）；
    - **视频标签**：点击 **导出视频**，导出至 `movie/<文件名>`；
    - **照片标签**：点击 **导出照片**，导出至 `photo/<文件名>`。
 
@@ -50,7 +50,7 @@
 
 | 素材分类与导出方式 | 自动创建的子目录与产物文件 | 写入/保留的元数据 | 适用平台与相册 |
 | :--- | :--- | :--- | :--- |
-| **Apple 实况照片** | `live/<名>I.JPG` + `live/<名>I.MOV` | `Make=DJI`、`Model=DJI OsmoPocket4P`、原始拍摄时间（EXIF + QuickTime `mvhd`/`tkhd`/`mdhd`）、配对 `ContentIdentifier` UUID | iPhone / iPad / macOS 系统相册、绿联云、极空间、群晖 Synology Photos、Immich、MT Photos 等 |
+| **Apple 原生实况照片** | `live/<名>I.HEIC` + `live/<名>I.MOV` | `Make=DJI`、`Model=DJI OsmoPocket4P`、原始拍摄时间、配对 `ContentIdentifier` UUID、Apple MakerNote（`RunTime` / `AccelerationVector` / `LivePhotoVideoIndex`）及 MOV `still-image-time` 定时元数据轨 | iPhone / iPad / macOS 系统相册（支持滑动自动播放与编辑更换封面帧）、绿联云、极空间、群晖 Synology Photos、Immich、MT Photos 等 |
 | **Android 动态照片** | `live/<名>A.jpg`（单文件内嵌视频） | `Make=DJI`、`Model=DJI OsmoPocket4P`、原始拍摄时间、`GCamera:MotionPhoto` XMP 容器描述 | Google Photos、小米 / OPPO / vivo / 三星等主流 Android 相册及支持动态照片的 NAS |
 | **普通视频导出** | `movie/<原文件名>` | 原文件无损复制 + 保留原始拍摄时间 | 所有桌面/移动播放器、剪辑软件及 NAS 影音库 |
 | **静态照片导出** | `photo/<原文件名>` | 原文件无损复制 + 保留原始 EXIF 与拍摄时间 | 所有系统相册、修图软件及 NAS 相册 |
@@ -80,8 +80,8 @@ lib/
   src/
     models.dart                 # MediaAsset 媒体资产模型与规格解析
     media_scanner.dart          # 目录扫描 + TPLG_VIDEO_LIVEPHOTO 实况特征识别
-    media_metadata.dart         # 纯 Dart MP4 设备信息提取、TIFF/EXIF 与 QuickTime MOV 原子读写引擎
-    live_photo_exporter.dart    # Apple Live Photo (JPG + MOV) 导出器
+    media_metadata.dart         # 纯 Dart MP4 解析、原生 HEIC (ISO/IEC 23008-12) 封装、TIFF/EXIF 与 QuickTime MOV 定时元数据轨引擎
+    live_photo_exporter.dart    # Apple 原生 Live Photo (HEIC + MOV) 导出器
     motion_photo_exporter.dart  # Google / Android Motion Photo (单文件 JPG) 导出器
     thumbnail_image.dart        # 视频帧缩略图懒加载与本地缓存
     tool_path.dart              # 跨平台内置工具路径解析（优先使用应用内置二进制）
