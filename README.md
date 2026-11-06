@@ -133,11 +133,12 @@ Pocket-Motion/
 ├── lib/
 │   ├── main.dart                  # Flutter 桌面端主界面（Shift 连选、目录记忆、三模式导出）
 │   └── src/
-│       ├── dcim_scanner.dart      # SD 卡与 DCIM 目录媒体扫描器（自动识别 ≤4.0s 实况素材）
+│       ├── media_scanner.dart     # 相机 DCIM 目录媒体扫描器（自动识别 ≤4.0s 实况素材）
 │       ├── live_photo_exporter.dart   # Apple Live Photo (.HEIC + .MOV) 导出器
 │       ├── motion_photo_exporter.dart # Google Motion Photo (.jpg) 导出器
 │       ├── media_metadata.dart    # 纯 Dart 媒体元数据与原生 HEIC / MOV still-image-time 引擎
 │       ├── models.dart            # 媒体资产数据模型与格式化工具
+│       ├── thumbnail_image.dart   # 卡片缩略图（调用 ffmpeg 抽帧并缓存到临时目录）
 │       └── tool_path.dart         # 跨平台内置工具路径解析器
 ├── macos/                         # macOS 原生工程配置与应用图标
 ├── windows/                       # Windows 原生工程配置、应用图标与版本资源
